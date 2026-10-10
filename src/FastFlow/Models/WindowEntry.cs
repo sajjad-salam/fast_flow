@@ -18,6 +18,18 @@ public sealed class WindowEntry
     /// <summary>Command-line arguments used when launching (editable).</summary>
     public string Arguments { get; set; } = "";
 
+    /// <summary>Browser windows: URLs of the open tabs, reopened in a new window when the workflow runs.</summary>
+    [Browsable(false)]
+    public List<string> Tabs { get; set; } = new();
+
+    /// <summary>Space-separated tab URLs, so they can be edited in the grid.</summary>
+    [JsonIgnore, DisplayName("Tabs")]
+    public string TabUrls
+    {
+        get => string.Join(" ", Tabs);
+        set => Tabs = (value ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+    }
+
     /// <summary>For packaged (Store / MSIX) apps: AppUserModelID used to launch and to recognise the window.</summary>
     public string AppUserModelId { get; set; } = "";
 

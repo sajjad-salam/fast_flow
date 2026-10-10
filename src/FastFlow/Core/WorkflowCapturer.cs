@@ -38,6 +38,13 @@ internal sealed class WorkflowCapturer
                 continue;
             var rect = placement.rcNormalPosition;
 
+            var tabs = BrowserTabs.IsBrowser(window.ProcessName) && string.IsNullOrEmpty(window.AppUserModelId)
+                ? BrowserTabs.Capture(window.Handle)
+                : new List<string>();
+            var arguments = GetArguments(window, explorerFolders);
+            if (tabs.Count > 0)
+                arguments = BrowserTabs.KeepSwitches(arguments);
+
             workflow.Windows.Add(new WindowEntry
             {
                 ProcessName = window.ProcessName,
@@ -45,7 +52,8 @@ internal sealed class WorkflowCapturer
                 ExecutablePath = window.ExecutablePath,
                 AppUserModelId = window.AppUserModelId,
                 WindowClass = window.ClassName,
-                Arguments = GetArguments(window, explorerFolders),
+                Arguments = arguments,
+                Tabs = tabs,
                 DesktopIndex = desktopIndex,
                 Left = rect.Left,
                 Top = rect.Top,
