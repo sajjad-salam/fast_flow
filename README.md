@@ -7,6 +7,7 @@ Save your Windows workspace — every open app, its window size/position, and th
 1. **Capture** – Open and arrange your apps across your virtual desktops, then click **Capture new workflow** and give it a name.
    FastFlow records, for every app window on every desktop:
    - the executable (and its command-line arguments, or the AppUserModelID for Store/MSIX apps, or the folder for File Explorer windows),
+   - for browser windows (Chrome, Edge, Brave, Vivaldi, Opera, Firefox, ...), the URLs of the open tabs,
    - the virtual desktop number,
    - the window's position, size and state (normal / maximized / minimized).
 2. **Run** – Select a workflow and click **Run workflow** (or double-click it, or press its shortcut). FastFlow:
@@ -15,9 +16,17 @@ Save your Windows workspace — every open app, its window size/position, and th
    - launches each app (or reuses an already-open window of it, if *Reuse windows that are already open* is checked),
    - waits for the window, sets its size/position/state, and moves it to its desktop,
    - does a second pass a moment later for apps that reposition themselves after starting.
-3. **Edit** – The grid on the right shows the captured windows. You can edit arguments, positions or the desktop number, or uncheck *Enabled* to skip a window. Changes are saved automatically.
+3. **Edit** – The grid on the right shows the captured windows. You can edit arguments, tab URLs, positions or the desktop number, or uncheck *Enabled* to skip a window. Changes are saved automatically.
 
 Workflows are stored in `%APPDATA%\FastFlow\workflows.json`, options in `settings.json` next to it.
+
+### Browser tabs
+
+When a workflow is captured, FastFlow reads the tabs of every browser window. Browsers only show the address of the active tab, so FastFlow briefly clicks through each tab and then reselects the one that was active. When the workflow runs, every browser window is opened as a new window with those tabs (Chromium browsers are started with `--new-window url1 url2 ...`), so e.g. a *Social* workflow can bring back Brave with Instagram and TikTok. Browser windows with saved tabs always open a new window, even when *Reuse windows that are already open* is checked.
+
+The *Tabs* column holds the URLs separated by spaces – edit it to add or remove tabs, or clear it to just start the browser as before. Internal pages (new tab, settings, `about:`) are not saved. If your browser is set to restore the previous session on startup, it will open those windows as well.
+
+Firefox-based browsers get the URLs as plain arguments: when Firefox is not running yet (the default, with *Close all open apps* checked) they open as tabs of one window, but a second Firefox window in the same workflow opens its tabs in the first one.
 
 ### Switching between workflows
 
@@ -71,7 +80,7 @@ On other builds the status line shows *read-only*: capture still works and apps 
 ## Known limitations
 
 - **Single-instance apps** (e.g. some chat or music apps) don't open a second window when launched again. Keep *Reuse windows that are already open* checked so the existing window is moved instead.
-- **What's inside an app is not restored** – e.g. browser tabs or open documents are up to the app itself (most browsers and editors restore their own session). For apps that take a file/folder argument, you can edit *Arguments* in the grid.
+- **What's inside an app is not restored**, apart from browser tabs – e.g. open documents are up to the app itself (most editors restore their own session). For apps that take a file/folder argument, you can edit *Arguments* in the grid.
 - **Elevated (Run as administrator) apps** can't be moved or resized by a non-elevated FastFlow because of Windows security (UIPI). Run FastFlow as administrator if you need that.
 - **Store (UWP) apps that are suspended** while capturing may be skipped, because Windows hides which app owns the window.
 - Window coordinates are physical pixels; if you change your monitor setup or scaling, re-capture the workflow (**Re-capture (update)**).
@@ -84,6 +93,7 @@ src/FastFlow/
   Models/                        Workflow / WindowEntry (what gets saved)
   Core/WindowEnumerator.cs       finds app windows on all desktops, their exe, args, AUMID
   Core/WorkflowCapturer.cs       builds a Workflow from the current screen
+  Core/BrowserTabs.cs            reads browser tab URLs (UI Automation) and reopens them
   Core/WorkflowRunner.cs         launches apps, finds their windows, restores placement and desktop
   Core/AppCloser.cs              closes all open apps on all desktops before a workflow runs
   Core/WorkflowStore.cs          JSON persistence

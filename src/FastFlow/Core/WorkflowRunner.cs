@@ -61,7 +61,8 @@ internal sealed class WorkflowRunner
             token.ThrowIfCancellationRequested();
 
             IntPtr? hwnd = null;
-            if (reuseOpenWindows)
+            // A browser window with saved tabs is always opened fresh, so that its tabs are restored.
+            if (reuseOpenWindows && entry.Tabs.Count == 0)
             {
                 hwnd = FindOpenWindow(entry, claimed);
                 if (hwnd != null)
@@ -134,14 +135,19 @@ internal sealed class WorkflowRunner
             }
             else
             {
-                psi = new ProcessStartInfo(entry.ExecutablePath, entry.Arguments)
+                var arguments = entry.Tabs.Count > 0
+                    ? BrowserTabs.BuildArguments(entry.ProcessName, entry.Arguments, entry.Tabs)
+                    : entry.Arguments;
+                psi = new ProcessStartInfo(entry.ExecutablePath, arguments)
                 {
                     WorkingDirectory = Path.GetDirectoryName(entry.ExecutablePath) ?? "",
                 };
             }
             psi.UseShellExecute = true;
 
-            _log($"  {entry.ProcessName}: launching...");
+            _log(entry.Tabs.Count > 0
+                ? $"  {entry.ProcessName}: launching with {entry.Tabs.Count} tab(s)..."
+                : $"  {entry.ProcessName}: launching...");
             Process.Start(psi)?.Dispose();
             return true;
         }
