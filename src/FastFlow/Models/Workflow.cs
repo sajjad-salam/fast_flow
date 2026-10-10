@@ -15,5 +15,13 @@ public sealed class Workflow
 
     public List<WindowEntry> Windows { get; set; } = new();
 
-    public override string ToString() => $"{Name}  ({Windows.Count} windows)";
+    /// <summary>Global keyboard shortcut that runs this workflow, e.g. "Ctrl+Alt+1" (empty = none).</summary>
+    public string Shortcut { get; set; } = "";
+
+    public Hotkey? GetHotkey() => Hotkey.TryParse(Shortcut, out var hotkey) ? hotkey : null;
+
+    public override string ToString() =>
+        GetHotkey() is { } hotkey
+            ? $"{Name}  [{hotkey}]  ({Windows.Count} windows)"
+            : $"{Name}  ({Windows.Count} windows)";
 }

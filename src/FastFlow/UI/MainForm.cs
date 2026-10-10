@@ -2,15 +2,26 @@ using System.ComponentModel;
 using FastFlow.Core;
 using FastFlow.Models;
 using FastFlow.VirtualDesktops;
+using Microsoft.Win32;
+using static FastFlow.Native.NativeMethods;
 
 namespace FastFlow.UI;
 
 internal sealed class MainForm : Form
 {
+    /// <summary>Broadcast by a second FastFlow instance to bring this one out of the tray.</summary>
+    public static readonly int ShowManagerMessage = RegisterWindowMessage("FastFlow.ShowManager");
+
+    private const string StartupKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    private const string StartupValue = "FastFlow";
+
     private readonly WorkflowStore _store = new();
     private readonly VirtualDesktopService _desktops = new();
     private readonly BindingList<Workflow> _workflows;
+    private readonly AppSettings _settings;
     private readonly string? _autoRunName;
+    private readonly NotifyIcon _tray = new() { Text = "FastFlow", Icon = SystemIcons.Application };
+    private readonly Dictionary<int, Workflow> _hotkeys = new();
 
     private readonly ListBox _list = new() { Dock = DockStyle.Fill, IntegralHeight = false };
     private readonly DataGridView _grid = new()
@@ -25,9 +36,17 @@ internal sealed class MainForm : Form
     {
         Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical,
     };
+    private readonly CheckBox _closeOthers = new()
+    {
+        Text = "Close all open apps (on every desktop) before running", AutoSize = true,
+    };
     private readonly CheckBox _reuse = new()
     {
-        Text = "Reuse windows that are already open", Checked = true, AutoSize = true,
+        Text = "Reuse windows that are already open", AutoSize = true,
+    };
+    private readonly CheckBox _startup = new()
+    {
+        Text = "Start with Windows (in the tray, so shortcuts always work)", AutoSize = true,
     };
     private readonly FlowLayoutPanel _buttons = new()
     {
@@ -35,10 +54,15 @@ internal sealed class MainForm : Form
     };
 
     private bool _running;
+    private bool _exiting;
+    private bool _startHidden;
+    private bool _trayHintShown;
 
-    public MainForm(string? autoRunName = null)
+    public MainForm(string? autoRunName = null, bool startInTray = false)
     {
         _autoRunName = autoRunName;
+        _startHidden = startInTray && autoRunName == null;
+        _settings = _store.LoadSettings();
 
         Text = "FastFlow – Workspace Workflows";
         Width = 1200;
@@ -66,6 +90,7 @@ internal sealed class MainForm : Form
             if (Selected is { } wf)
                 await CaptureAsync(replace: wf);
         });
+        AddButton("Set shortcut...", () => { SetShortcut(); return Task.CompletedTask; });
         AddButton("Rename", () => { Rename(); return Task.CompletedTask; });
         AddButton("Delete", () => { Delete(); return Task.CompletedTask; });
         AddButton("Copy run command", () => { CopyCommand(); return Task.CompletedTask; });
@@ -88,8 +113,17 @@ internal sealed class MainForm : Form
         var bottom = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2 };
         bottom.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         bottom.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        _closeOthers.Checked = _settings.CloseOtherApps;
+        _reuse.Checked = _settings.ReuseOpenWindows;
+        _startup.Checked = IsStartupEnabled();
+        _closeOthers.CheckedChanged += (_, _) => { _settings.CloseOtherApps = _closeOthers.Checked; SaveSettings(); };
+        _reuse.CheckedChanged += (_, _) => { _settings.ReuseOpenWindows = _reuse.Checked; SaveSettings(); };
+        _startup.CheckedChanged += (_, _) => SetStartup(_startup.Checked);
+
         var options = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+        options.Controls.Add(_closeOthers);
         options.Controls.Add(_reuse);
+        options.Controls.Add(_startup);
         options.Controls.Add(new Label
         {
             Text = _desktops.Status, AutoSize = true, Padding = new Padding(16, 4, 0, 0),
@@ -110,12 +144,54 @@ internal sealed class MainForm : Form
             split.SplitterDistance = 440;
         };
         Shown += async (_, _) => await AutoRunAsync();
+        FormClosing += OnFormClosing;
 
+        SetUpTray();
         ShowSelected();
         Log($"Workflows are stored in {_store.FilePath}");
     }
 
     private Workflow? Selected => _list.SelectedItem as Workflow;
+
+    protected override void SetVisibleCore(bool value)
+    {
+        // Started with --tray: create the window (needed for the global shortcuts) but keep it hidden.
+        if (_startHidden)
+        {
+            _startHidden = false;
+            if (!IsHandleCreated)
+                CreateHandle();
+            value = false;
+        }
+        base.SetVisibleCore(value);
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        RegisterHotkeys();
+    }
+
+    protected override void OnHandleDestroyed(EventArgs e)
+    {
+        UnregisterHotkeys();
+        base.OnHandleDestroyed(e);
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == WM_HOTKEY && _hotkeys.TryGetValue(m.WParam.ToInt32(), out var workflow))
+        {
+            _ = RunFromShortcutAsync(workflow);
+            return;
+        }
+        if (m.Msg == ShowManagerMessage && ShowManagerMessage != 0)
+        {
+            ShowFromTray();
+            return;
+        }
+        base.WndProc(ref m);
+    }
 
     private void AddButton(string text, Func<Task> action)
     {
@@ -163,6 +239,18 @@ internal sealed class MainForm : Form
         }
     }
 
+    private void SaveSettings()
+    {
+        try
+        {
+            _store.SaveSettings(_settings);
+        }
+        catch (Exception ex)
+        {
+            Log($"Could not save settings: {ex.Message}");
+        }
+    }
+
     private void ShowSelected()
     {
         _grid.DataSource = Selected == null ? null : new BindingList<WindowEntry>(Selected.Windows);
@@ -194,6 +282,7 @@ internal sealed class MainForm : Form
         {
             captured.Id = replace.Id;
             captured.CreatedAt = replace.CreatedAt;
+            captured.Shortcut = replace.Shortcut;
             _workflows[_workflows.IndexOf(replace)] = captured;
         }
         else
@@ -203,6 +292,7 @@ internal sealed class MainForm : Form
         _list.SelectedItem = captured;
         ShowSelected();
         SaveAll();
+        RegisterHotkeys();
 
         var perDesktop = captured.Windows
             .GroupBy(w => w.DesktopIndex)
@@ -225,7 +315,7 @@ internal sealed class MainForm : Form
         _buttons.Enabled = false;
         try
         {
-            await new WorkflowRunner(_desktops, Log).RunAsync(workflow, _reuse.Checked);
+            await new WorkflowRunner(_desktops, Log).RunAsync(workflow, _reuse.Checked, _closeOthers.Checked);
         }
         catch (Exception ex)
         {
@@ -278,6 +368,174 @@ internal sealed class MainForm : Form
         _workflows.Remove(wf);
         SaveAll();
         ShowSelected();
+        RegisterHotkeys();
+    }
+
+    private void SetShortcut()
+    {
+        if (Selected is not { } wf)
+            return;
+
+        // Suspend the global shortcuts while recording, otherwise pressing one would run its workflow.
+        UnregisterHotkeys();
+        Hotkey? result;
+        try
+        {
+            result = HotkeyDialog.Show(this, wf.Name, wf.GetHotkey());
+        }
+        finally
+        {
+            RegisterHotkeys();
+        }
+        if (result is not { } hotkey)
+            return;
+
+        if (!hotkey.IsEmpty)
+        {
+            var other = _workflows.FirstOrDefault(w => w != wf && w.GetHotkey() == hotkey);
+            if (other != null
+                && MessageBox.Show(this, $"{hotkey} is already the shortcut of \"{other.Name}\". Move it to \"{wf.Name}\"?",
+                    "FastFlow", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                return;
+            if (other != null)
+            {
+                other.Shortcut = "";
+                _workflows.ResetItem(_workflows.IndexOf(other));
+            }
+        }
+
+        wf.Shortcut = hotkey.IsEmpty ? "" : hotkey.ToString();
+        _workflows.ResetItem(_workflows.IndexOf(wf));
+        SaveAll();
+        RegisterHotkeys();
+        Log(hotkey.IsEmpty
+            ? $"Removed the shortcut of \"{wf.Name}\"."
+            : $"\"{wf.Name}\" now runs with {hotkey} from anywhere (while FastFlow is open or in the tray).");
+    }
+
+    private void RegisterHotkeys()
+    {
+        // OnHandleCreated can fire before the constructor has loaded the workflows.
+        if (!IsHandleCreated || _workflows is null)
+            return;
+        UnregisterHotkeys();
+
+        var id = 1;
+        foreach (var workflow in _workflows)
+        {
+            if (workflow.GetHotkey() is not { } hotkey)
+                continue;
+
+            uint modifiers = MOD_NOREPEAT;
+            if (hotkey.Modifiers.HasFlag(HotkeyModifiers.Ctrl)) modifiers |= MOD_CONTROL;
+            if (hotkey.Modifiers.HasFlag(HotkeyModifiers.Alt)) modifiers |= MOD_ALT;
+            if (hotkey.Modifiers.HasFlag(HotkeyModifiers.Shift)) modifiers |= MOD_SHIFT;
+            if (hotkey.Modifiers.HasFlag(HotkeyModifiers.Win)) modifiers |= MOD_WIN;
+
+            if (RegisterHotKey(Handle, id, modifiers, (uint)hotkey.Key))
+                _hotkeys[id++] = workflow;
+            else
+                Log($"Shortcut {hotkey} for \"{workflow.Name}\" could not be registered – another app or Windows already uses it. Pick a different one.");
+        }
+    }
+
+    private void UnregisterHotkeys()
+    {
+        foreach (var id in _hotkeys.Keys)
+            UnregisterHotKey(Handle, id);
+        _hotkeys.Clear();
+    }
+
+    private async Task RunFromShortcutAsync(Workflow workflow)
+    {
+        if (_running)
+            return;
+        _tray.ShowBalloonTip(2000, "FastFlow", $"Switching to \"{workflow.Name}\"...", ToolTipIcon.Info);
+        await RunAsync(workflow);
+    }
+
+    private void SetUpTray()
+    {
+        var menu = new ContextMenuStrip();
+        menu.Opening += (_, _) =>
+        {
+            menu.Items.Clear();
+            var open = new ToolStripMenuItem("Open FastFlow", null, (_, _) => ShowFromTray());
+            open.Font = new Font(open.Font, FontStyle.Bold);
+            menu.Items.Add(open);
+            if (_workflows.Count > 0)
+                menu.Items.Add(new ToolStripSeparator());
+            foreach (var workflow in _workflows)
+            {
+                var item = new ToolStripMenuItem(workflow.Name, null, async (_, _) => await RunAsync(workflow))
+                {
+                    ShortcutKeyDisplayString = workflow.GetHotkey()?.ToString(),
+                    Enabled = !_running,
+                };
+                menu.Items.Add(item);
+            }
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("Exit", null, (_, _) => ExitApplication());
+        };
+        menu.Items.Add("Exit"); // placeholder so the menu opens; rebuilt in Opening
+        _tray.ContextMenuStrip = menu;
+        _tray.DoubleClick += (_, _) => ShowFromTray();
+        _tray.Visible = _autoRunName == null;
+    }
+
+    private void ShowFromTray()
+    {
+        Show();
+        if (WindowState == FormWindowState.Minimized)
+            WindowState = FormWindowState.Normal;
+        Activate();
+    }
+
+    private void OnFormClosing(object? sender, FormClosingEventArgs e)
+    {
+        // Closing the window keeps FastFlow in the tray so the workflow shortcuts keep working.
+        if (!_exiting && _autoRunName == null && e.CloseReason == CloseReason.UserClosing)
+        {
+            e.Cancel = true;
+            Hide();
+            if (!_trayHintShown)
+            {
+                _trayHintShown = true;
+                _tray.ShowBalloonTip(3000, "FastFlow is still running",
+                    "Workflow shortcuts keep working. Right-click the tray icon to run a workflow or exit.", ToolTipIcon.Info);
+            }
+            return;
+        }
+        _tray.Visible = false;
+        _tray.Dispose();
+    }
+
+    private void ExitApplication()
+    {
+        _exiting = true;
+        Close();
+    }
+
+    private static bool IsStartupEnabled()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(StartupKey);
+        return key?.GetValue(StartupValue) is string;
+    }
+
+    private void SetStartup(bool enabled)
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.CreateSubKey(StartupKey);
+            if (enabled)
+                key.SetValue(StartupValue, $"\"{Application.ExecutablePath}\" --tray");
+            else
+                key.DeleteValue(StartupValue, throwOnMissingValue: false);
+        }
+        catch (Exception ex)
+        {
+            Log($"Could not change the Windows startup setting: {ex.Message}");
+        }
     }
 
     private void CopyCommand()

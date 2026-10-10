@@ -9,14 +9,25 @@ Save your Windows workspace — every open app, its window size/position, and th
    - the executable (and its command-line arguments, or the AppUserModelID for Store/MSIX apps, or the folder for File Explorer windows),
    - the virtual desktop number,
    - the window's position, size and state (normal / maximized / minimized).
-2. **Run** – Select a workflow and click **Run workflow** (or double-click it). FastFlow:
+2. **Run** – Select a workflow and click **Run workflow** (or double-click it, or press its shortcut). FastFlow:
+   - closes every open app on every virtual desktop (when *Close all open apps before running* is checked – the default), so you start the workflow from a clean slate,
    - creates missing virtual desktops,
    - launches each app (or reuses an already-open window of it, if *Reuse windows that are already open* is checked),
    - waits for the window, sets its size/position/state, and moves it to its desktop,
    - does a second pass a moment later for apps that reposition themselves after starting.
 3. **Edit** – The grid on the right shows the captured windows. You can edit arguments, positions or the desktop number, or uncheck *Enabled* to skip a window. Changes are saved automatically.
 
-Workflows are stored in `%APPDATA%\FastFlow\workflows.json`.
+Workflows are stored in `%APPDATA%\FastFlow\workflows.json`, options in `settings.json` next to it.
+
+### Switching between workflows
+
+Apps are closed the same way as clicking their X button, so they can save their session or ask about unsaved work. FastFlow waits up to 10 seconds for them; a window that is still open after that (e.g. a pending "Save changes?" prompt) is left alone and the workflow starts anyway. FastFlow itself is never closed. Uncheck *Close all open apps* to keep the old behaviour of adding the workflow's apps to what is already open.
+
+### Keyboard shortcuts
+
+Select a workflow and click **Set shortcut...**, then press the combination you want – Ctrl, Alt, Shift and/or Win plus one key, e.g. `Ctrl+Alt+1` or `Ctrl+Alt+Shift+F5` (F1–F24 also work on their own). The shortcut is shown next to the workflow name and works from any app, on any desktop.
+
+Shortcuts work while FastFlow is running, so closing the window keeps it in the notification area (tray); right-click the tray icon to run a workflow or **Exit**. Check *Start with Windows* to start FastFlow hidden in the tray at sign-in (`FastFlow.exe --tray`), so your shortcuts are always available. If a combination is already taken by Windows or another app, the log says so – pick another one.
 
 ### One-click from anywhere
 
@@ -69,12 +80,13 @@ On other builds the status line shows *read-only*: capture still works and apps 
 
 ```
 src/FastFlow/
-  Program.cs                     entry point, --run command line
+  Program.cs                     entry point, --run / --tray command line, single instance
   Models/                        Workflow / WindowEntry (what gets saved)
   Core/WindowEnumerator.cs       finds app windows on all desktops, their exe, args, AUMID
   Core/WorkflowCapturer.cs       builds a Workflow from the current screen
   Core/WorkflowRunner.cs         launches apps, finds their windows, restores placement and desktop
+  Core/AppCloser.cs              closes all open apps on all desktops before a workflow runs
   Core/WorkflowStore.cs          JSON persistence
   VirtualDesktops/               documented + version-specific undocumented virtual desktop COM interop
-  UI/                            WinForms main window
+  UI/                            WinForms main window, tray icon, global shortcuts, shortcut recorder
 ```

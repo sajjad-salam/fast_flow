@@ -4,7 +4,7 @@ using FastFlow.Models;
 
 namespace FastFlow.Core;
 
-/// <summary>Persists workflows as JSON in %APPDATA%\FastFlow\workflows.json.</summary>
+/// <summary>Persists workflows (workflows.json) and app settings (settings.json) as JSON in %APPDATA%\FastFlow.</summary>
 internal sealed class WorkflowStore
 {
     private static readonly JsonSerializerOptions Options = new()
@@ -15,6 +15,8 @@ internal sealed class WorkflowStore
 
     public string FilePath { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "FastFlow", "workflows.json");
+
+    public string SettingsPath => Path.Combine(Path.GetDirectoryName(FilePath)!, "settings.json");
 
     public List<Workflow> Load()
     {
@@ -30,5 +32,25 @@ internal sealed class WorkflowStore
         var temp = FilePath + ".tmp";
         File.WriteAllText(temp, JsonSerializer.Serialize(workflows, Options));
         File.Move(temp, FilePath, overwrite: true);
+    }
+
+    public AppSettings LoadSettings()
+    {
+        try
+        {
+            if (File.Exists(SettingsPath))
+                return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath), Options) ?? new AppSettings();
+        }
+        catch
+        {
+            // unreadable settings – fall back to the defaults
+        }
+        return new AppSettings();
+    }
+
+    public void SaveSettings(AppSettings settings)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
+        File.WriteAllText(SettingsPath, JsonSerializer.Serialize(settings, Options));
     }
 }
