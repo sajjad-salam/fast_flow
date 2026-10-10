@@ -9,14 +9,16 @@ Save your Windows workspace — every open app, its window size/position, and th
    - the executable (and its command-line arguments, or the AppUserModelID for Store/MSIX apps, or the folder for File Explorer windows),
    - for browser windows (Chrome, Edge, Brave, Vivaldi, Opera, Firefox, ...), the URLs of the open tabs,
    - the virtual desktop number,
-   - the window's position, size and state (normal / maximized / minimized).
+   - the window's position, size and state (normal / maximized / minimized). The position is where the window actually is on screen, so snapped layouts (Win+Arrow keys, Snap Layouts, side-by-side windows) and windows on other monitors are restored exactly as arranged.
 2. **Run** – Select a workflow and click **Run workflow** (or double-click it, or press its shortcut). FastFlow:
    - closes every open app on every virtual desktop (when *Close all open apps before running* is checked – the default), so you start the workflow from a clean slate,
    - creates missing virtual desktops,
    - launches each app (or reuses an already-open window of it, if *Reuse windows that are already open* is checked),
    - waits for the window, sets its size/position/state, and moves it to its desktop,
-   - does a second pass a moment later for apps that reposition themselves after starting.
+   - checks again a few seconds later and puts back any window that an app moved or resized itself after starting (browsers and Electron apps often restore their own last position).
 3. **Edit** – The grid on the right shows the captured windows. You can edit arguments, tab URLs, positions or the desktop number, or uncheck *Enabled* to skip a window. Changes are saved automatically.
+
+Workflows captured with an older version of FastFlow saved the window's pre-snap size, so a snapped window comes back at its old floating size. Arrange your windows and click **Re-capture (update)** to save the exact layout.
 
 Workflows are stored in `%APPDATA%\FastFlow\workflows.json`, options in `settings.json` next to it.
 

@@ -36,7 +36,13 @@ internal sealed class WorkflowCapturer
             var placement = WINDOWPLACEMENT.Create();
             if (!GetWindowPlacement(window.Handle, ref placement))
                 continue;
-            var rect = placement.rcNormalPosition;
+            var state = placement.showCmd switch
+            {
+                SW_SHOWMAXIMIZED => WindowState.Maximized,
+                SW_SHOWMINIMIZED or SW_MINIMIZE or SW_SHOWMINNOACTIVE => WindowState.Minimized,
+                _ => WindowState.Normal,
+            };
+            var rect = GetBounds(window.Handle, state, placement);
 
             var tabs = BrowserTabs.IsBrowser(window.ProcessName) && string.IsNullOrEmpty(window.AppUserModelId)
                 ? BrowserTabs.Capture(window.Handle)
@@ -59,18 +65,27 @@ internal sealed class WorkflowCapturer
                 Top = rect.Top,
                 Width = rect.Right - rect.Left,
                 Height = rect.Bottom - rect.Top,
-                State = placement.showCmd switch
-                {
-                    SW_SHOWMAXIMIZED => WindowState.Maximized,
-                    SW_SHOWMINIMIZED or SW_MINIMIZE or SW_SHOWMINNOACTIVE => WindowState.Minimized,
-                    _ => WindowState.Normal,
-                },
+                ScreenCoordinates = true,
+                State = state,
             });
         }
 
         // Stable sort: group by desktop while keeping the z-order inside each desktop.
         workflow.Windows = workflow.Windows.OrderBy(w => w.DesktopIndex).ToList();
         return workflow;
+    }
+
+    /// <summary>
+    /// Screen bounds to save. A normal window is saved where it actually is: for snapped windows
+    /// (Win+Arrow, Snap Layouts) the placement's normal position is the pre-snap size, not the layout
+    /// on screen. Maximized and minimized windows keep the bounds they restore to.
+    /// </summary>
+    private static RECT GetBounds(IntPtr hwnd, WindowState state, WINDOWPLACEMENT placement)
+    {
+        if (state == WindowState.Normal && GetWindowRect(hwnd, out var actual)
+            && actual.Right > actual.Left && actual.Bottom > actual.Top)
+            return actual;
+        return WindowGeometry.ToScreen(placement.rcNormalPosition);
     }
 
     private static string GetArguments(WindowInfo window, Dictionary<IntPtr, string> explorerFolders)

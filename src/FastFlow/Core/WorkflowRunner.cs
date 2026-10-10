@@ -17,6 +17,7 @@ internal sealed class WorkflowRunner
     private static readonly TimeSpan WindowTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan ClassMismatchGrace = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan[] CorrectionDelays = { TimeSpan.FromMilliseconds(1500), TimeSpan.FromMilliseconds(2500) };
 
     private readonly VirtualDesktopService _desktops;
     private readonly Action<string> _log;
@@ -88,12 +89,16 @@ internal sealed class WorkflowRunner
             placed.Add((entry, hwnd.Value));
         }
 
-        // Some apps move or resize themselves once they finish loading; enforce the layout again.
-        await Task.Delay(1500, token);
-        foreach (var (entry, handle) in placed)
+        // Some apps (browsers, Electron apps, ...) move or resize themselves once they finish loading,
+        // sometimes seconds later; enforce the layout again on the windows that drifted.
+        foreach (var delay in CorrectionDelays)
         {
-            if (IsWindow(handle))
-                Apply(entry, handle, firstPass: false);
+            await Task.Delay(delay, token);
+            foreach (var (entry, handle) in placed)
+            {
+                if (IsWindow(handle))
+                    Apply(entry, handle, firstPass: false);
+            }
         }
 
         _log($"Done: {placed.Count} of {entries.Count} windows restored.");
@@ -196,18 +201,30 @@ internal sealed class WorkflowRunner
             _log($"  {entry.ProcessName}: placed on desktop {entry.DesktopIndex + 1}.");
     }
 
-    private static void ApplyPlacement(WindowEntry entry, IntPtr hwnd)
+    /// <summary>Saved bounds in both coordinate systems: screen (SetWindowPos) and workspace (SetWindowPlacement).</summary>
+    private static (RECT Screen, RECT Workspace) GetTargetBounds(WindowEntry entry)
     {
-        var placement = WINDOWPLACEMENT.Create();
-        GetWindowPlacement(hwnd, ref placement);
-        placement.flags = 0;
-        placement.rcNormalPosition = new RECT
+        var rect = new RECT
         {
             Left = entry.Left,
             Top = entry.Top,
             Right = entry.Left + entry.Width,
             Bottom = entry.Top + entry.Height,
         };
+        return entry.ScreenCoordinates
+            ? (rect, WindowGeometry.ToWorkspace(rect))
+            : (WindowGeometry.ToScreen(rect), rect);
+    }
+
+    private static void ApplyPlacement(WindowEntry entry, IntPtr hwnd)
+    {
+        var (screen, workspace) = GetTargetBounds(entry);
+
+        // Sets the state, and the bounds a maximized/minimized window returns to (on the right monitor).
+        var placement = WINDOWPLACEMENT.Create();
+        GetWindowPlacement(hwnd, ref placement);
+        placement.flags = 0;
+        placement.rcNormalPosition = workspace;
         placement.showCmd = entry.State switch
         {
             WindowState.Maximized => SW_SHOWMAXIMIZED,
@@ -215,18 +232,33 @@ internal sealed class WorkflowRunner
             _ => SW_SHOWNOACTIVATE,
         };
         SetWindowPlacement(hwnd, ref placement);
+
+        if (entry.State != WindowState.Normal)
+            return;
+
+        // Then put a normal window at its exact on-screen rectangle. Done twice: when the window moves
+        // to a monitor with a different DPI, the app rescales itself after the first move.
+        for (var i = 0; i < 2; i++)
+        {
+            SetWindowPos(hwnd, IntPtr.Zero, screen.Left, screen.Top, screen.Right - screen.Left, screen.Bottom - screen.Top,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        }
     }
 
-    /// <summary>Second pass: only touch windows that drifted, and never re-activate maximized ones.</summary>
+    /// <summary>Correction pass: only touch windows that drifted, and never re-activate maximized ones.</summary>
     private static void CorrectPlacement(WindowEntry entry, IntPtr hwnd)
     {
         var placement = WINDOWPLACEMENT.Create();
         if (!GetWindowPlacement(hwnd, ref placement))
             return;
 
-        var r = placement.rcNormalPosition;
-        var boundsOk = r.Left == entry.Left && r.Top == entry.Top
-                       && r.Right - r.Left == entry.Width && r.Bottom - r.Top == entry.Height;
+        var (screen, workspace) = GetTargetBounds(entry);
+        bool boundsOk;
+        if (entry.State == WindowState.Normal)
+            boundsOk = GetWindowRect(hwnd, out var actual) && SameRect(actual, screen);
+        else
+            boundsOk = SameRect(placement.rcNormalPosition, workspace);
+
         var stateOk = entry.State switch
         {
             WindowState.Maximized => IsZoomed(hwnd),
@@ -237,4 +269,7 @@ internal sealed class WorkflowRunner
         if (!boundsOk || !stateOk)
             ApplyPlacement(entry, hwnd);
     }
+
+    private static bool SameRect(RECT a, RECT b) =>
+        a.Left == b.Left && a.Top == b.Top && a.Right == b.Right && a.Bottom == b.Bottom;
 }
