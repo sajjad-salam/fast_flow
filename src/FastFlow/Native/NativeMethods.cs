@@ -47,6 +47,18 @@ internal static class NativeMethods
     public static extern bool IsZoomed(IntPtr hWnd);
 
     [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromRect(ref RECT lprc, uint dwFlags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+    [DllImport("user32.dll", SetLastError = true)]
     public static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
@@ -109,6 +121,12 @@ internal static class NativeMethods
     public const int SW_MINIMIZE = 6;
     public const int SW_SHOWMINNOACTIVE = 7;
 
+    public const uint SWP_NOZORDER = 0x0004;
+    public const uint SWP_NOACTIVATE = 0x0010;
+    public const uint SWP_NOOWNERZORDER = 0x0200;
+
+    public const uint MONITOR_DEFAULTTONEAREST = 2;
+
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT
     {
@@ -137,6 +155,18 @@ internal static class NativeMethods
 
         public static WINDOWPLACEMENT Create() =>
             new() { length = Marshal.SizeOf<WINDOWPLACEMENT>() };
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MONITORINFO
+    {
+        public int cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
+
+        public static MONITORINFO Create() =>
+            new() { cbSize = Marshal.SizeOf<MONITORINFO>() };
     }
 
     [StructLayout(LayoutKind.Sequential)]

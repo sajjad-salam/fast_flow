@@ -47,11 +47,21 @@ public sealed class WindowEntry
         set => DesktopIndex = Math.Max(0, value - 1);
     }
 
-    /// <summary>Restored (normal) window bounds, in workspace coordinates as reported by GetWindowPlacement.</summary>
+    /// <summary>
+    /// Window bounds in screen coordinates: where the window actually is (including snapped layouts)
+    /// when <see cref="State"/> is Normal, otherwise the bounds it returns to when restored.
+    /// </summary>
     public int Left { get; set; }
     public int Top { get; set; }
     public int Width { get; set; }
     public int Height { get; set; }
+
+    /// <summary>
+    /// True for bounds in screen coordinates (current captures). Workflows captured by older versions
+    /// stored the un-snapped restore bounds in workspace coordinates, and have this false.
+    /// </summary>
+    [Browsable(false)]
+    public bool ScreenCoordinates { get; set; }
 
     public WindowState State { get; set; } = WindowState.Normal;
 
