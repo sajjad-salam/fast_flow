@@ -30,13 +30,15 @@ internal sealed class WorkflowRunner
 
     /// <param name="reuseOpenWindows">Use a matching window that is already open instead of launching a new instance.</param>
     /// <param name="closeOtherApps">First close every open app window on every virtual desktop.</param>
-    public async Task RunAsync(Workflow workflow, bool reuseOpenWindows, bool closeOtherApps, CancellationToken token = default)
+    /// <param name="keepOpenApps">Executable names of apps that <paramref name="closeOtherApps"/> leaves running.</param>
+    public async Task RunAsync(Workflow workflow, bool reuseOpenWindows, bool closeOtherApps,
+        IEnumerable<string> keepOpenApps, CancellationToken token = default)
     {
         var entries = workflow.Windows.Where(w => w.Enabled).ToList();
         _log($"Running \"{workflow.Name}\" ({entries.Count} windows)...");
 
         if (closeOtherApps)
-            await AppCloser.CloseAllAsync(_log, token);
+            await AppCloser.CloseAllAsync(keepOpenApps, _log, token);
 
         if (entries.Count == 0)
             return;

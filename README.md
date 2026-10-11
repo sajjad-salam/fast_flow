@@ -33,7 +33,11 @@ Firefox-based browsers get the URLs as plain arguments: when Firefox is not runn
 
 ### Switching between workflows
 
-Apps are closed the same way as clicking their X button, so they can save their session or ask about unsaved work. FastFlow waits up to 10 seconds for them; a window that is still open after that (e.g. a pending "Save changes?" prompt) is left alone and the workflow starts anyway. FastFlow itself is never closed. Uncheck *Close all open apps* to keep the old behaviour of adding the workflow's apps to what is already open.
+Apps are closed the same way as clicking their X button, so they can save their session or ask about unsaved work. FastFlow waits up to 10 seconds for them; a window that is still open after that (e.g. a pending "Save changes?" prompt) is left alone and the workflow starts anyway. FastFlow itself is never closed.
+
+To leave specific apps running (e.g. the MEmu Android emulator), click **Apps to keep open...** next to the option and add them, one per line, by executable name (`MEmu` or `MEmu.exe`), or pick one from the list of apps that are open right now. Their windows are skipped on every desktop. Some apps use several executables (MEmu's multi-instance manager is `MEmuConsole`), so add each one whose window should stay open.
+
+Uncheck *Close all open apps* to keep the old behaviour of adding the workflow's apps to what is already open.
 
 ### Keyboard shortcuts
 

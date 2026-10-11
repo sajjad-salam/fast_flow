@@ -14,13 +14,20 @@ internal static class AppCloser
     private static readonly TimeSpan ExitTimeout = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
 
-    public static async Task CloseAllAsync(Action<string> log, CancellationToken token = default)
+    /// <param name="keepOpenApps">Executable names (with or without ".exe") of apps to leave running.</param>
+    public static async Task CloseAllAsync(IEnumerable<string> keepOpenApps, Action<string> log, CancellationToken token = default)
     {
         // Never close FastFlow itself, including another FastFlow instance (e.g. the tray one when run with --run).
         var ownExe = Environment.ProcessPath ?? "";
-        var windows = WindowEnumerator.GetAppWindows()
+        var keep = keepOpenApps.Select(NormalizeAppName).Where(n => n.Length > 0)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var candidates = WindowEnumerator.GetAppWindows()
             .Where(w => !string.Equals(w.ExecutablePath, ownExe, StringComparison.OrdinalIgnoreCase))
             .ToList();
+        var kept = candidates.Where(w => keep.Contains(w.ProcessName)).ToList();
+        var windows = candidates.Except(kept).ToList();
+        if (kept.Count > 0)
+            log($"Keeping {kept.Count} window(s) open: {string.Join(", ", kept.Select(w => w.ProcessName).Distinct(StringComparer.OrdinalIgnoreCase))}.");
         if (windows.Count == 0)
             return;
 
@@ -61,6 +68,16 @@ internal static class AppCloser
 
         var closed = windows.Count(w => !IsOpen(w.Handle));
         log($"Closed {closed} of {windows.Count} window(s).");
+    }
+
+    /// <summary>"C:\Program Files\Microvirt\MEmu\MEmu.exe", "MEmu.exe" and " MEmu " all become "MEmu".</summary>
+    public static string NormalizeAppName(string name)
+    {
+        name = name.Trim().Trim('"');
+        if (name.Length == 0)
+            return "";
+        name = Path.GetFileName(name);
+        return name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? name[..^4] : name;
     }
 
     // Hidden counts as closed: apps that minimise to the tray hide their window instead of destroying it.

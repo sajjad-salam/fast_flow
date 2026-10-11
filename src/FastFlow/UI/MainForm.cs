@@ -121,8 +121,24 @@ internal sealed class MainForm : Form
         _reuse.CheckedChanged += (_, _) => { _settings.ReuseOpenWindows = _reuse.Checked; SaveSettings(); };
         _startup.CheckedChanged += (_, _) => SetStartup(_startup.Checked);
 
+        var keepOpen = new Button { AutoSize = true, Margin = new Padding(0, 0, 12, 0) };
+        void ShowKeepOpenCount() => keepOpen.Text = $"Apps to keep open ({_settings.KeepOpenApps.Count})...";
+        ShowKeepOpenCount();
+        keepOpen.Enabled = _closeOthers.Checked;
+        _closeOthers.CheckedChanged += (_, _) => keepOpen.Enabled = _closeOthers.Checked;
+        keepOpen.Click += (_, _) =>
+        {
+            if (KeepOpenDialog.Show(this, _settings.KeepOpenApps) is not { } apps)
+                return;
+            _settings.KeepOpenApps = apps;
+            SaveSettings();
+            ShowKeepOpenCount();
+            Log(apps.Count == 0 ? "No apps are kept open." : $"Apps kept open when a workflow runs: {string.Join(", ", apps)}");
+        };
+
         var options = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         options.Controls.Add(_closeOthers);
+        options.Controls.Add(keepOpen);
         options.Controls.Add(_reuse);
         options.Controls.Add(_startup);
         options.Controls.Add(new Label
@@ -316,7 +332,7 @@ internal sealed class MainForm : Form
         _buttons.Enabled = false;
         try
         {
-            await new WorkflowRunner(_desktops, Log).RunAsync(workflow, _reuse.Checked, _closeOthers.Checked);
+            await new WorkflowRunner(_desktops, Log).RunAsync(workflow, _reuse.Checked, _closeOthers.Checked, _settings.KeepOpenApps);
         }
         catch (Exception ex)
         {
