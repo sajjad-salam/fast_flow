@@ -153,19 +153,21 @@ internal sealed class VirtualDesktopService
         }
     }
 
-    public void SwitchToDesktop(int index)
+    /// <summary>Makes the desktop at <paramref name="index"/> the active one. Returns false if not possible.</summary>
+    public bool SwitchToDesktop(int index)
     {
         var ids = GetDesktopIds();
-        if (_backend != null && index >= 0 && index < ids.Count)
+        if (_backend == null || index < 0 || index >= ids.Count)
+            return false;
+
+        try
         {
-            try
-            {
-                _backend.SwitchToDesktop(ids[index]);
-            }
-            catch
-            {
-                // non-essential
-            }
+            _backend.SwitchToDesktop(ids[index]);
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 }

@@ -89,6 +89,16 @@ internal sealed class WorkflowRunner
             placed.Add((entry, hwnd.Value));
         }
 
+        // A layout that lives on a single desktop: take the user there, wherever they started the run from.
+        var desktops = entries.Select(e => e.DesktopIndex).Distinct().ToList();
+        if (desktops.Count == 1 && placed.Count > 0)
+        {
+            if (_desktops.SwitchToDesktop(desktops[0]))
+                _log($"Switched to desktop {desktops[0] + 1}.");
+            else if (_desktops.CanMoveWindows)
+                _log($"Could not switch to desktop {desktops[0] + 1}.");
+        }
+
         // Some apps (browsers, Electron apps, ...) move or resize themselves once they finish loading,
         // sometimes seconds later; enforce the layout again on the windows that drifted.
         foreach (var delay in CorrectionDelays)
