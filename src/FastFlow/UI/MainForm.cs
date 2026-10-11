@@ -115,6 +115,7 @@ internal sealed class MainForm : Form
         bottom.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         _closeOthers.Checked = _settings.CloseOtherApps;
         _reuse.Checked = _settings.ReuseOpenWindows;
+        RefreshStartupEntry();
         _startup.Checked = IsStartupEnabled();
         _closeOthers.CheckedChanged += (_, _) => { _settings.CloseOtherApps = _closeOthers.Checked; SaveSettings(); };
         _reuse.CheckedChanged += (_, _) => { _settings.ReuseOpenWindows = _reuse.Checked; SaveSettings(); };
@@ -475,6 +476,10 @@ internal sealed class MainForm : Form
                 menu.Items.Add(item);
             }
             menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(new ToolStripMenuItem("Start with Windows", null, (_, _) => _startup.Checked = !_startup.Checked)
+            {
+                Checked = IsStartupEnabled(),
+            });
             menu.Items.Add("Exit", null, (_, _) => ExitApplication());
         };
         menu.Items.Add("Exit"); // placeholder so the menu opens; rebuilt in Opening
@@ -522,15 +527,35 @@ internal sealed class MainForm : Form
         return key?.GetValue(StartupValue) is string;
     }
 
+    private static string StartupCommand => $"\"{Application.ExecutablePath}\" --tray";
+
+    /// <summary>Keeps an enabled startup entry pointing at this exe, in case FastFlow was moved or updated.</summary>
+    private void RefreshStartupEntry()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(StartupKey, writable: true);
+            if (key?.GetValue(StartupValue) is string command && command != StartupCommand)
+                key.SetValue(StartupValue, StartupCommand);
+        }
+        catch
+        {
+            // non-essential
+        }
+    }
+
     private void SetStartup(bool enabled)
     {
         try
         {
             using var key = Registry.CurrentUser.CreateSubKey(StartupKey);
             if (enabled)
-                key.SetValue(StartupValue, $"\"{Application.ExecutablePath}\" --tray");
+                key.SetValue(StartupValue, StartupCommand);
             else
                 key.DeleteValue(StartupValue, throwOnMissingValue: false);
+            Log(enabled
+                ? "FastFlow will start with Windows (hidden in the tray)."
+                : "FastFlow will no longer start with Windows.");
         }
         catch (Exception ex)
         {
