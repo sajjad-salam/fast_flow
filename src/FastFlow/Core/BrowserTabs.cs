@@ -20,7 +20,8 @@ internal static class BrowserTabs
     };
 
     private const int MaxDepth = 30;
-    private static readonly TimeSpan TabSwitchDelay = TimeSpan.FromMilliseconds(200);
+    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(50);
+    private static readonly TimeSpan TabSwitchTimeout = TimeSpan.FromSeconds(2);
 
     public static bool IsBrowser(string processName) => Browsers.ContainsKey(processName);
 
@@ -42,13 +43,21 @@ internal static class BrowserTabs
 
             var urls = new List<string>();
             var active = tabs.FirstOrDefault(IsSelected);
+            // The address bar shows the tab that is selected right now. Every tab other than that one
+            // (including the originally active tab, once another has been selected) has to be selected
+            // and its address waited for, or the previous tab's address is read again.
+            var selected = active;
+            var shown = ReadValue(addressBar);
             foreach (var tab in tabs)
             {
-                if (!ReferenceEquals(tab, active) && !Select(tab))
-                    continue;
-                if (!ReferenceEquals(tab, active))
-                    Thread.Sleep(TabSwitchDelay);
-                if (Normalize(ReadValue(addressBar)) is { } url)
+                if (!ReferenceEquals(tab, selected))
+                {
+                    if (!Select(tab))
+                        continue;
+                    selected = tab;
+                    shown = WaitForAddress(tab, addressBar, shown);
+                }
+                if (Normalize(shown) is { } url)
                     urls.Add(url);
             }
 
@@ -180,6 +189,40 @@ internal static class BrowserTabs
             // tab closed or not selectable
         }
         return false;
+    }
+
+    /// <summary>
+    /// Waits until the address bar follows the newly selected <paramref name="tab"/>: the tab reports
+    /// itself selected and the address differs from <paramref name="previous"/> and has stopped changing.
+    /// Two tabs can show the same address, so after a timeout the current value is taken as it is.
+    /// </summary>
+    private static string WaitForAddress(AutomationElement tab, AutomationElement addressBar, string previous)
+    {
+        var deadline = DateTime.UtcNow + TabSwitchTimeout;
+        var last = previous;
+        while (DateTime.UtcNow < deadline)
+        {
+            Thread.Sleep(PollInterval);
+            var value = ReadValue(addressBar);
+            if (value != previous && value == last && IsSelectedOrUnknown(tab))
+                return value;
+            last = value;
+        }
+        return ReadValue(addressBar);
+    }
+
+    /// <summary>True if the tab is selected, or if it does not report its selection state at all.</summary>
+    private static bool IsSelectedOrUnknown(AutomationElement tab)
+    {
+        try
+        {
+            return !tab.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var pattern)
+                   || ((SelectionItemPattern)pattern).Current.IsSelected;
+        }
+        catch
+        {
+            return true;
+        }
     }
 
     private static string ReadValue(AutomationElement edit) =>
