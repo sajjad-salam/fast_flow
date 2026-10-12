@@ -17,6 +17,7 @@ Save your Windows workspace — every open app, its window size/position, and th
    - waits for the window, sets its size/position/state, and moves it to its desktop,
    - if all of the workflow's windows are on one virtual desktop, switches you to that desktop once the apps are open (workflows that span several desktops leave you where you are),
    - checks again a few seconds later and puts back any window that an app moved or resized itself after starting (browsers and Electron apps often restore their own last position).
+   - when everything is open, shows a small notification that slides up from the bottom of the screen ("*Work* is ready") for a few seconds. It doesn't take focus; click it to dismiss it.
 3. **Edit** – The grid on the right shows the captured windows. You can edit arguments, tab URLs, positions or the desktop number, or uncheck *Enabled* to skip a window. Changes are saved automatically.
 
 Workflows captured with an older version of FastFlow saved the window's pre-snap size, so a snapped window comes back at its old floating size. Arrange your windows and click **Re-capture (update)** to save the exact layout.

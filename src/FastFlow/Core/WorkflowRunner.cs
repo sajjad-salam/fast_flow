@@ -31,7 +31,8 @@ internal sealed class WorkflowRunner
     /// <param name="reuseOpenWindows">Use a matching window that is already open instead of launching a new instance.</param>
     /// <param name="closeOtherApps">First close every open app window on every virtual desktop.</param>
     /// <param name="keepOpenApps">Executable names of apps that <paramref name="closeOtherApps"/> leaves running.</param>
-    public async Task RunAsync(Workflow workflow, bool reuseOpenWindows, bool closeOtherApps,
+    /// <returns>How many of the workflow's enabled windows were restored.</returns>
+    public async Task<(int Restored, int Total)> RunAsync(Workflow workflow, bool reuseOpenWindows, bool closeOtherApps,
         IEnumerable<string> keepOpenApps, CancellationToken token = default)
     {
         var entries = workflow.Windows.Where(w => w.Enabled).ToList();
@@ -41,7 +42,7 @@ internal sealed class WorkflowRunner
             await AppCloser.CloseAllAsync(keepOpenApps, _log, token);
 
         if (entries.Count == 0)
-            return;
+            return (0, 0);
 
         var needed = entries.Max(e => e.DesktopIndex) + 1;
         try
@@ -114,6 +115,7 @@ internal sealed class WorkflowRunner
         }
 
         _log($"Done: {placed.Count} of {entries.Count} windows restored.");
+        return (placed.Count, entries.Count);
     }
 
     private static bool Matches(WindowEntry entry, WindowInfo window)

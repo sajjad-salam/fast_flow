@@ -57,6 +57,7 @@ internal sealed class MainForm : Form
     private bool _exiting;
     private bool _startHidden;
     private bool _trayHintShown;
+    private Task _toast = Task.CompletedTask;
 
     public MainForm(string? autoRunName = null, bool startInTray = false)
     {
@@ -332,7 +333,12 @@ internal sealed class MainForm : Form
         _buttons.Enabled = false;
         try
         {
-            await new WorkflowRunner(_desktops, Log).RunAsync(workflow, _reuse.Checked, _closeOthers.Checked, _settings.KeepOpenApps);
+            var (restored, total) = await new WorkflowRunner(_desktops, Log)
+                .RunAsync(workflow, _reuse.Checked, _closeOthers.Checked, _settings.KeepOpenApps);
+            if (total > 0)
+                _toast = ToastWindow.ShowAsync($"“{workflow.Name}” is ready", restored == total
+                    ? total == 1 ? "FastFlow finished opening the window" : $"FastFlow finished opening all {total} windows"
+                    : $"Opened {restored} of {total} windows");
         }
         catch (Exception ex)
         {
@@ -360,6 +366,7 @@ internal sealed class MainForm : Form
 
         WindowState = FormWindowState.Minimized;
         await RunAsync(workflow);
+        await _toast;
         Close();
     }
 
