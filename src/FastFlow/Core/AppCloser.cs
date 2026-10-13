@@ -13,6 +13,8 @@ internal static class AppCloser
     private static readonly TimeSpan CloseTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan ExitTimeout = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan ReopenWatch = TimeSpan.FromSeconds(1);
+    private const int MaxRetries = 3;
 
     /// <param name="keepOpenApps">Executable names (with or without ".exe") of apps to leave running.</param>
     public static async Task CloseAllAsync(IEnumerable<string> keepOpenApps, Action<string> log, CancellationToken token = default)
@@ -32,6 +34,37 @@ internal static class AppCloser
             return;
 
         log($"Closing {windows.Count} open window(s) on all desktops...");
+        var closing = windows.Select(w => w.ProcessName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var handled = windows.Select(w => w.Handle).ToHashSet();
+        var pending = windows;
+        for (var attempt = 0; ; attempt++)
+        {
+            await CloseWindowsAsync(pending, log, token);
+
+            // Some apps don't exit on the first close: CapCut, for example, closes the open project and shows
+            // its home screen instead. Close whatever new windows the closed apps open, a few times at most.
+            pending = await WaitForExitAsync(windows, closing, handled, ownExe, token);
+            if (pending.Count == 0)
+                break;
+            if (attempt == MaxRetries)
+            {
+                foreach (var window in pending)
+                    log($"  {window.ProcessName}: keeps opening new windows (\"{window.Title}\"), giving up.");
+                break;
+            }
+
+            foreach (var window in pending)
+                log($"  {window.ProcessName}: opened \"{window.Title}\" instead of exiting, closing it again.");
+            handled.UnionWith(pending.Select(w => w.Handle));
+            windows.AddRange(pending);
+        }
+
+        var closed = windows.Count(w => !IsOpen(w.Handle));
+        log($"Closed {closed} of {windows.Count} window(s).");
+    }
+
+    private static async Task CloseWindowsAsync(List<WindowInfo> windows, Action<string> log, CancellationToken token)
+    {
         foreach (var window in windows)
         {
             if (!PostMessage(window.Handle, WM_CLOSE, IntPtr.Zero, IntPtr.Zero))
@@ -44,9 +77,17 @@ internal static class AppCloser
 
         foreach (var window in windows.Where(w => IsOpen(w.Handle)))
             log($"  {window.ProcessName}: \"{window.Title}\" is still open (it may be asking to save), continuing.");
+    }
 
-        // Let the closed apps finish shutting down, otherwise single-instance apps (browsers, editors) may
-        // hand the new launch to the dying process. Apps that keep running in the tray never exit; don't wait on them forever.
+    /// <summary>
+    /// Lets the closed apps finish shutting down, otherwise single-instance apps (browsers, editors) may
+    /// hand the new launch to the dying process. Stops early when one of them opens a new window instead.
+    /// </summary>
+    /// <returns>New windows the closed apps opened while shutting down; empty once they have all exited.</returns>
+    private static async Task<List<WindowInfo>> WaitForExitAsync(List<WindowInfo> windows, HashSet<string> closing,
+        HashSet<IntPtr> handled, string ownExe, CancellationToken token)
+    {
+        // Apps that keep running in the tray never exit; don't wait on them forever.
         var stillOpenPids = WindowEnumerator.GetAppWindows().Select(w => w.ProcessId).ToHashSet();
         var exiting = windows
             .Select(w => w.ProcessId)
@@ -57,17 +98,28 @@ internal static class AppCloser
             .ToList();
         try
         {
-            var deadline = DateTime.UtcNow + ExitTimeout;
-            while (DateTime.UtcNow < deadline && exiting.Any(p => !HasExited(p)))
+            var timer = Stopwatch.StartNew();
+            while (true)
+            {
+                // An app whose window is still open may be asking to save; leave its other windows alone.
+                var busy = windows.Where(w => IsOpen(w.Handle)).Select(w => w.ProcessId).ToHashSet();
+                var reopened = WindowEnumerator.GetAppWindows()
+                    .Where(w => closing.Contains(w.ProcessName) && !handled.Contains(w.Handle) && !busy.Contains(w.ProcessId)
+                        && !string.Equals(w.ExecutablePath, ownExe, StringComparison.OrdinalIgnoreCase)
+                        && !IsShell(w.ProcessId))
+                    .ToList();
+                if (reopened.Count > 0)
+                    return reopened;
+                // Always watch briefly: the new window can take a moment to appear, even from a fresh process.
+                if (timer.Elapsed >= ExitTimeout || (timer.Elapsed >= ReopenWatch && exiting.All(HasExited)))
+                    return [];
                 await Task.Delay(PollInterval, token);
+            }
         }
         finally
         {
             exiting.ForEach(p => p.Dispose());
         }
-
-        var closed = windows.Count(w => !IsOpen(w.Handle));
-        log($"Closed {closed} of {windows.Count} window(s).");
     }
 
     /// <summary>"C:\Program Files\Microvirt\MEmu\MEmu.exe", "MEmu.exe" and " MEmu " all become "MEmu".</summary>
