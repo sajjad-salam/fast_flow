@@ -44,7 +44,7 @@ internal sealed class WorkflowRunner
         if (entries.Count == 0)
             return (0, 0);
 
-        var needed = entries.Max(e => e.DesktopIndex) + 1;
+        var needed = Math.Max(entries.Max(e => e.DesktopIndex) + 1, workflow.FinishDesktop);
         try
         {
             var created = _desktops.EnsureDesktopCount(needed);
@@ -92,14 +92,21 @@ internal sealed class WorkflowRunner
             placed.Add((entry, hwnd.Value));
         }
 
-        // A layout that lives on a single desktop: take the user there, wherever they started the run from.
+        // Take the user to the desktop chosen for this workflow, or – by default – to the desktop of a
+        // layout that lives on a single desktop, wherever they started the run from.
         var desktops = entries.Select(e => e.DesktopIndex).Distinct().ToList();
-        if (desktops.Count == 1 && placed.Count > 0)
+        int? finish = workflow.FinishDesktop switch
         {
-            if (_desktops.SwitchToDesktop(desktops[0]))
-                _log($"Switched to desktop {desktops[0] + 1}.");
+            Workflow.FinishDesktopStay => null,
+            Workflow.FinishDesktopAutomatic => desktops.Count == 1 ? desktops[0] : null,
+            var number => number - 1,
+        };
+        if (finish is { } index && placed.Count > 0)
+        {
+            if (_desktops.SwitchToDesktop(index))
+                _log($"Switched to desktop {index + 1}.");
             else if (_desktops.CanMoveWindows)
-                _log($"Could not switch to desktop {desktops[0] + 1}.");
+                _log($"Could not switch to desktop {index + 1}.");
         }
 
         // Some apps (browsers, Electron apps, ...) move or resize themselves once they finish loading,

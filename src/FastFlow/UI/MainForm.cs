@@ -92,6 +92,7 @@ internal sealed class MainForm : Form
                 await CaptureAsync(replace: wf);
         });
         AddButton("Set shortcut...", () => { SetShortcut(); return Task.CompletedTask; });
+        AddButton("Desktop after run...", () => { SetFinishDesktop(); return Task.CompletedTask; });
         AddButton("Rename", () => { Rename(); return Task.CompletedTask; });
         AddButton("Delete", () => { Delete(); return Task.CompletedTask; });
         AddButton("Copy run command", () => { CopyCommand(); return Task.CompletedTask; });
@@ -301,6 +302,7 @@ internal sealed class MainForm : Form
             captured.Id = replace.Id;
             captured.CreatedAt = replace.CreatedAt;
             captured.Shortcut = replace.Shortcut;
+            captured.FinishDesktop = replace.FinishDesktop;
             _workflows[_workflows.IndexOf(replace)] = captured;
         }
         else
@@ -435,6 +437,26 @@ internal sealed class MainForm : Form
         Log(hotkey.IsEmpty
             ? $"Removed the shortcut of \"{wf.Name}\"."
             : $"\"{wf.Name}\" now runs with {hotkey} from anywhere (while FastFlow is open or in the tray).");
+    }
+
+    private void SetFinishDesktop()
+    {
+        if (Selected is not { } wf)
+            return;
+
+        var desktopCount = Math.Max(_desktops.GetDesktopIds().Count,
+            Math.Max(wf.DesktopCount, wf.Windows.Select(w => w.DesktopIndex + 1).DefaultIfEmpty(0).Max()));
+        if (FinishDesktopDialog.Show(this, wf.Name, wf.FinishDesktop, desktopCount) is not { } choice)
+            return;
+
+        wf.FinishDesktop = choice;
+        SaveAll();
+        Log(choice switch
+        {
+            Workflow.FinishDesktopAutomatic => $"\"{wf.Name}\" switches to its desktop after running if all of its apps are on one desktop.",
+            Workflow.FinishDesktopStay => $"\"{wf.Name}\" stays on the current desktop after running.",
+            _ => $"\"{wf.Name}\" switches to desktop {choice} after running.",
+        });
     }
 
     private void RegisterHotkeys()

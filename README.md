@@ -15,7 +15,7 @@ Save your Windows workspace — every open app, its window size/position, and th
    - creates missing virtual desktops,
    - launches each app (or reuses an already-open window of it, if *Reuse windows that are already open* is checked),
    - waits for the window, sets its size/position/state, and moves it to its desktop,
-   - if all of the workflow's windows are on one virtual desktop, switches you to that desktop once the apps are open (workflows that span several desktops leave you where you are),
+   - once the apps are open, switches you to the desktop chosen with **Desktop after run...** – by default, the workflow's desktop if all of its windows are on one virtual desktop (workflows that span several desktops leave you where you are),
    - checks again a few seconds later and puts back any window that an app moved or resized itself after starting (browsers and Electron apps often restore their own last position).
    - when everything is open, shows a small notification that slides up from the bottom of the screen ("*Work* is ready") for a few seconds. It doesn't take focus; click it to dismiss it.
 3. **Edit** – The grid on the right shows the captured windows. You can edit arguments, tab URLs, positions or the desktop number, or uncheck *Enabled* to skip a window. Changes are saved automatically.
@@ -45,6 +45,16 @@ Uncheck *Close all open apps* to keep the old behaviour of adding the workflow's
 Select a workflow and click **Set shortcut...**, then press the combination you want – Ctrl, Alt, Shift and/or Win plus one key, e.g. `Ctrl+Alt+1` or `Ctrl+Alt+Shift+F5` (F1–F24 also work on their own). The shortcut is shown next to the workflow name and works from any app, on any desktop.
 
 Shortcuts work while FastFlow is running, so closing the window keeps it in the notification area (tray); right-click the tray icon to run a workflow or **Exit**. Check *Start with Windows* (also in the tray menu) to start FastFlow hidden in the tray at sign-in (`FastFlow.exe --tray`), so your shortcuts are always available. If a combination is already taken by Windows or another app, the log says so – pick another one.
+
+### Desktop after run
+
+Select a workflow and click **Desktop after run...** to choose which virtual desktop you end up on once all of its apps are open:
+
+- **Automatic** (the default) – the workflow's desktop if all of its windows are on one desktop; otherwise you stay where you are.
+- **Stay on the current desktop** – never switch.
+- **Desktop 1, 2, ...** – always switch to that desktop (it is created if it doesn't exist yet), e.g. so a workflow that spans three desktops always leaves you on desktop 2.
+
+The choice is saved with the workflow and kept when you re-capture it.
 
 ### One-click from anywhere
 

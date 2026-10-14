@@ -18,6 +18,15 @@ public sealed class Workflow
     /// <summary>Global keyboard shortcut that runs this workflow, e.g. "Ctrl+Alt+1" (empty = none).</summary>
     public string Shortcut { get; set; } = "";
 
+    public const int FinishDesktopAutomatic = 0;
+    public const int FinishDesktopStay = -1;
+
+    /// <summary>
+    /// Virtual desktop (1-based) to switch to once every app is open. <see cref="FinishDesktopAutomatic"/>
+    /// switches only when all windows are on one desktop; <see cref="FinishDesktopStay"/> never switches.
+    /// </summary>
+    public int FinishDesktop { get; set; } = FinishDesktopAutomatic;
+
     public Hotkey? GetHotkey() => Hotkey.TryParse(Shortcut, out var hotkey) ? hotkey : null;
 
     public override string ToString() =>
