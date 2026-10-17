@@ -28,7 +28,10 @@ internal sealed class WorkflowRunner
         _log = log;
     }
 
-    /// <param name="reuseOpenWindows">Use a matching window that is already open instead of launching a new instance.</param>
+    /// <param name="reuseOpenWindows">
+    /// Use a matching window that is already open instead of launching a new instance; such windows are
+    /// also spared by <paramref name="closeOtherApps"/> and just moved and resized into place.
+    /// </param>
     /// <param name="closeOtherApps">First close every open app window on every virtual desktop.</param>
     /// <param name="keepOpenApps">Executable names of apps that <paramref name="closeOtherApps"/> leaves running.</param>
     /// <returns>How many of the workflow's enabled windows were restored.</returns>
@@ -38,8 +41,25 @@ internal sealed class WorkflowRunner
         var entries = workflow.Windows.Where(w => w.Enabled).ToList();
         _log($"Running \"{workflow.Name}\" ({entries.Count} windows)...");
 
+        // Pick the open windows to reuse before closing anything, so that switching between workflows
+        // that share an app (e.g. Obsidian) moves its window instead of closing and relaunching it.
+        var claimed = new HashSet<IntPtr>();
+        var reused = new Dictionary<WindowEntry, IntPtr>();
+        if (reuseOpenWindows)
+        {
+            // A browser window with saved tabs is always opened fresh, so that its tabs are restored.
+            foreach (var entry in entries.Where(e => e.Tabs.Count == 0))
+            {
+                if (FindOpenWindow(entry, claimed) is { } hwnd)
+                {
+                    claimed.Add(hwnd);
+                    reused[entry] = hwnd;
+                }
+            }
+        }
+
         if (closeOtherApps)
-            await AppCloser.CloseAllAsync(keepOpenApps, _log, token);
+            await AppCloser.CloseAllAsync(keepOpenApps, claimed, _log, token);
 
         if (entries.Count == 0)
             return (0, 0);
@@ -57,7 +77,6 @@ internal sealed class WorkflowRunner
         }
 
         var preExisting = WindowEnumerator.GetAppWindows().Select(w => w.Handle).ToHashSet();
-        var claimed = new HashSet<IntPtr>();
         var placed = new List<(WindowEntry Entry, IntPtr Handle)>();
 
         foreach (var entry in entries)
@@ -65,12 +84,10 @@ internal sealed class WorkflowRunner
             token.ThrowIfCancellationRequested();
 
             IntPtr? hwnd = null;
-            // A browser window with saved tabs is always opened fresh, so that its tabs are restored.
-            if (reuseOpenWindows && entry.Tabs.Count == 0)
+            if (reused.TryGetValue(entry, out var open) && IsWindow(open))
             {
-                hwnd = FindOpenWindow(entry, claimed);
-                if (hwnd != null)
-                    _log($"  {entry.ProcessName}: reusing open window \"{WindowEnumerator.GetTitle(hwnd.Value)}\"");
+                hwnd = open;
+                _log($"  {entry.ProcessName}: reusing open window \"{WindowEnumerator.GetTitle(open)}\"");
             }
 
             if (hwnd == null)

@@ -106,8 +106,21 @@ internal sealed class ToastWindow : Form
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
+        PlayNotificationSound();
         _clock.Start();
         _timer.Start();
+    }
+
+    /// <summary>
+    /// Plays the Windows notification sound (the one chosen in Sound settings), falling back to the
+    /// stock one if the user's scheme has none. Asynchronous, so the slide-in isn't held up.
+    /// </summary>
+    private static void PlayNotificationSound()
+    {
+        if (PlaySound("Notification.Default", IntPtr.Zero, SND_ALIAS | SND_ASYNC | SND_NODEFAULT | SND_SYSTEM))
+            return;
+        var wav = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Media", "Windows Notify System Generic.wav");
+        PlaySound(wav, IntPtr.Zero, SND_FILENAME | SND_ASYNC | SND_NODEFAULT | SND_SYSTEM);
     }
 
     private void Dismiss()

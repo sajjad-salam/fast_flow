@@ -11,13 +11,13 @@ Save your Windows workspace — every open app, its window size/position, and th
    - the virtual desktop number,
    - the window's position, size and state (normal / maximized / minimized). The position is where the window actually is on screen, so snapped layouts (Win+Arrow keys, Snap Layouts, side-by-side windows) and windows on other monitors are restored exactly as arranged.
 2. **Run** – Select a workflow and click **Run workflow** (or double-click it, or press its shortcut). FastFlow:
-   - closes every open app on every virtual desktop (when *Close all open apps before running* is checked – the default), so you start the workflow from a clean slate,
+   - closes every open app on every virtual desktop (when *Close all open apps before running* is checked – the default), so you start the workflow from a clean slate – except windows the workflow can reuse (see below),
    - creates missing virtual desktops,
    - launches each app (or reuses an already-open window of it, if *Reuse windows that are already open* is checked),
    - waits for the window, sets its size/position/state, and moves it to its desktop,
    - once the apps are open, switches you to the desktop chosen with **Desktop after run...** – by default, the workflow's desktop if all of its windows are on one virtual desktop (workflows that span several desktops leave you where you are),
    - checks again a few seconds later and puts back any window that an app moved or resized itself after starting (browsers and Electron apps often restore their own last position).
-   - when everything is open, shows a small notification that slides up from the bottom of the screen ("*Work* is ready") for a few seconds. It doesn't take focus; click it to dismiss it.
+   - when everything is open, plays the Windows notification sound and shows a small notification that slides up from the bottom of the screen ("*Work* is ready") for a few seconds. It doesn't take focus; click it to dismiss it.
 3. **Edit** – The grid on the right shows the captured windows. You can edit arguments, tab URLs, positions or the desktop number, or uncheck *Enabled* to skip a window. Changes are saved automatically.
 
 Workflows captured with an older version of FastFlow saved the window's pre-snap size, so a snapped window comes back at its old floating size. Arrange your windows and click **Re-capture (update)** to save the exact layout.
@@ -37,6 +37,8 @@ Firefox-based browsers get the URLs as plain arguments: when Firefox is not runn
 Apps are closed the same way as clicking their X button, so they can save their session or ask about unsaved work. FastFlow waits up to 10 seconds for them; a window that is still open after that (e.g. a pending "Save changes?" prompt) is left alone and the workflow starts anyway. FastFlow itself is never closed.
 
 To leave specific apps running (e.g. the MEmu Android emulator), click **Apps to keep open...** next to the option and add them, one per line, by executable name (`MEmu` or `MEmu.exe`), or pick one from the list of apps that are open right now. Their windows are skipped on every desktop. Some apps use several executables (MEmu's multi-instance manager is `MEmuConsole`), so add each one whose window should stay open.
+
+When *Reuse windows that are already open* is checked (the default), a window of an app that the new workflow also uses is not closed: FastFlow keeps it and just moves it to the workflow's desktop at the workflow's size and position. So switching between two workflows that both have, say, Obsidian moves the Obsidian window instead of closing and relaunching it. Browser windows with saved tabs are still closed and reopened, so that their tabs come back.
 
 Uncheck *Close all open apps* to keep the old behaviour of adding the workflow's apps to what is already open.
 

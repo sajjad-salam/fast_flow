@@ -213,6 +213,15 @@ internal static class NativeMethods
             new() { cbSize = Marshal.SizeOf<MONITORINFO>() };
     }
 
+    public const uint SND_ASYNC = 0x0001;
+    public const uint SND_NODEFAULT = 0x0002;
+    public const uint SND_ALIAS = 0x00010000;
+    public const uint SND_FILENAME = 0x00020000;
+    public const uint SND_SYSTEM = 0x00200000;
+
+    [DllImport("winmm.dll", CharSet = CharSet.Unicode)]
+    public static extern bool PlaySound(string pszSound, IntPtr hmod, uint fdwSound);
+
     [StructLayout(LayoutKind.Sequential)]
     public struct UNICODE_STRING
     {

@@ -17,7 +17,9 @@ internal static class AppCloser
     private const int MaxRetries = 3;
 
     /// <param name="keepOpenApps">Executable names (with or without ".exe") of apps to leave running.</param>
-    public static async Task CloseAllAsync(IEnumerable<string> keepOpenApps, Action<string> log, CancellationToken token = default)
+    /// <param name="keepWindows">Individual windows to leave open, e.g. ones the next workflow will reuse.</param>
+    public static async Task CloseAllAsync(IEnumerable<string> keepOpenApps, IReadOnlySet<IntPtr> keepWindows,
+        Action<string> log, CancellationToken token = default)
     {
         // Never close FastFlow itself, including another FastFlow instance (e.g. the tray one when run with --run).
         var ownExe = Environment.ProcessPath ?? "";
@@ -27,15 +29,19 @@ internal static class AppCloser
             .Where(w => !string.Equals(w.ExecutablePath, ownExe, StringComparison.OrdinalIgnoreCase))
             .ToList();
         var kept = candidates.Where(w => keep.Contains(w.ProcessName)).ToList();
-        var windows = candidates.Except(kept).ToList();
+        var reused = candidates.Where(w => keepWindows.Contains(w.Handle)).Except(kept).ToList();
+        var windows = candidates.Except(kept).Except(reused).ToList();
         if (kept.Count > 0)
             log($"Keeping {kept.Count} window(s) open: {string.Join(", ", kept.Select(w => w.ProcessName).Distinct(StringComparer.OrdinalIgnoreCase))}.");
+        if (reused.Count > 0)
+            log($"Keeping {reused.Count} window(s) the workflow uses: {string.Join(", ", reused.Select(w => w.ProcessName).Distinct(StringComparer.OrdinalIgnoreCase))}.");
         if (windows.Count == 0)
             return;
 
         log($"Closing {windows.Count} open window(s) on all desktops...");
         var closing = windows.Select(w => w.ProcessName).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var handled = windows.Select(w => w.Handle).ToHashSet();
+        // A kept window of an app whose other windows are closed is not one it "reopened".
+        var handled = windows.Select(w => w.Handle).Concat(keepWindows).ToHashSet();
         var pending = windows;
         for (var attempt = 0; ; attempt++)
         {
