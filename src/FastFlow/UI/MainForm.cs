@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Text.RegularExpressions;
 using FastFlow.Core;
 using FastFlow.Models;
 using FastFlow.VirtualDesktops;
@@ -20,38 +21,49 @@ internal sealed class MainForm : Form
     private readonly BindingList<Workflow> _workflows;
     private readonly AppSettings _settings;
     private readonly string? _autoRunName;
-    private readonly NotifyIcon _tray = new() { Text = "FastFlow", Icon = SystemIcons.Application };
+    private readonly NotifyIcon _tray = new() { Text = "FastFlow", Icon = Theme.AppIcon };
     private readonly Dictionary<int, Workflow> _hotkeys = new();
 
-    private readonly ListBox _list = new() { Dock = DockStyle.Fill, IntegralHeight = false };
+    private readonly ListBox _list = new()
+    {
+        Dock = DockStyle.Fill, IntegralHeight = false, BorderStyle = BorderStyle.None,
+        DrawMode = DrawMode.OwnerDrawFixed, BackColor = Theme.Card,
+    };
     private readonly DataGridView _grid = new()
     {
         Dock = DockStyle.Fill,
         AllowUserToAddRows = false,
         AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.DisplayedCells,
         SelectionMode = DataGridViewSelectionMode.FullRowSelect,
-        RowHeadersWidth = 24,
+        RowHeadersVisible = false,
     };
     private readonly TextBox _log = new()
     {
         Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical,
+        BorderStyle = BorderStyle.None, BackColor = Theme.Card, ForeColor = Color.FromArgb(90, 90, 90), Font = Theme.Mono,
     };
-    private readonly CheckBox _closeOthers = new()
+    private readonly ToggleSwitch _closeOthers = new() { Text = "Close all open apps before running" };
+    private readonly ToggleSwitch _reuse = new() { Text = "Reuse windows that are already open" };
+    private readonly ToggleSwitch _startup = new() { Text = "Start with Windows" };
+    private readonly ToolTip _tips = new();
+
+    private readonly TwoToneLabel _listTitle = new() { Font = Theme.Heading, ForeColor = Theme.Ink, Strong = "Workflows" };
+    private readonly Label _emptyList = new()
     {
-        Text = "Close all open apps (on every desktop) before running", AutoSize = true,
+        Dock = DockStyle.Top, AutoSize = true, ForeColor = Theme.Muted, Padding = new Padding(0, 8, 0, 0),
+        Text = "No workflows yet. Arrange your apps across your desktops, then capture them.",
+        MaximumSize = new Size(300, 0),
     };
-    private readonly CheckBox _reuse = new()
+    private readonly Label _title = new() { AutoSize = true, Font = Theme.Title, ForeColor = Theme.Ink, Margin = Padding.Empty };
+    private readonly Label _summary = new() { AutoSize = true, ForeColor = Theme.Muted, Margin = new Padding(0, 6, 0, 0) };
+    private readonly FlowLayoutPanel _actions = new()
     {
-        Text = "Reuse windows that are already open", AutoSize = true,
+        Dock = DockStyle.Fill, AutoSize = true, Margin = new Padding(0, 16, 0, 4),
     };
-    private readonly CheckBox _startup = new()
-    {
-        Text = "Start with Windows (in the tray, so shortcuts always work)", AutoSize = true,
-    };
-    private readonly FlowLayoutPanel _buttons = new()
-    {
-        Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true,
-    };
+    private PillButton _runButton = null!;
+
+    /// <summary>Command buttons, disabled while a workflow runs; the value says whether one needs a selected workflow.</summary>
+    private readonly Dictionary<PillButton, bool> _commands = new();
 
     private bool _running;
     private bool _exiting;
@@ -65,16 +77,22 @@ internal sealed class MainForm : Form
         _startHidden = startInTray && autoRunName == null;
         _settings = _store.LoadSettings();
 
-        Text = "FastFlow – Workspace Workflows";
-        Width = 1200;
-        Height = 720;
+        Theme.Apply(this);
+        Text = "FastFlow";
+        Width = 1280;
+        Height = 880;
+        MinimumSize = new Size(940, 640);
         StartPosition = FormStartPosition.CenterScreen;
 
         _workflows = new BindingList<Workflow>(LoadWorkflows());
         _list.DataSource = _workflows;
         _list.SelectedIndexChanged += (_, _) => ShowSelected();
         _list.DoubleClick += async (_, _) => await RunSelectedAsync();
+        _list.DrawItem += DrawWorkflow;
+        _list.Resize += (_, _) => _list.Invalidate();
+        _workflows.ListChanged += (_, _) => ShowListState();
 
+        StyleGrid();
         _grid.CurrentCellDirtyStateChanged += (_, _) =>
         {
             // Commit checkbox clicks immediately so they get saved.
@@ -83,38 +101,65 @@ internal sealed class MainForm : Form
         };
         _grid.CellValueChanged += (_, e) => { if (e.RowIndex >= 0) SaveAll(); };
         _grid.DataError += (_, e) => { e.ThrowException = false; };
+        _grid.DataBindingComplete += (_, _) =>
+        {
+            // "ExecutablePath" -> "Executable path"
+            foreach (DataGridViewColumn column in _grid.Columns)
+            {
+                var text = Regex.Replace(column.HeaderText, "(?<=[a-z])(?=[A-Z])", " ").ToLowerInvariant();
+                if (text.Length > 0)
+                    column.HeaderText = char.ToUpperInvariant(text[0]) + text[1..];
+            }
+        };
 
-        AddButton("Capture new workflow", async () => await CaptureAsync(replace: null));
-        AddButton("Run workflow", RunSelectedAsync);
-        AddButton("Re-capture (update)", async () =>
+        var capture = AddButton("Capture new workflow", async () => await CaptureAsync(replace: null),
+            primary: true, needsSelection: false);
+        capture.Anchor = AnchorStyles.Right;
+        capture.Margin = Padding.Empty;
+        _runButton = AddButton("Run workflow", RunSelectedAsync, primary: true);
+        _runButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        _runButton.Margin = new Padding(16, 0, 0, 0);
+        _actions.Controls.Add(AddButton("Re-capture (update)", async () =>
         {
             if (Selected is { } wf)
                 await CaptureAsync(replace: wf);
-        });
-        AddButton("Set shortcut...", () => { SetShortcut(); return Task.CompletedTask; });
-        AddButton("Desktop after run...", () => { SetFinishDesktop(); return Task.CompletedTask; });
-        AddButton("Rename", () => { Rename(); return Task.CompletedTask; });
-        AddButton("Delete", () => { Delete(); return Task.CompletedTask; });
-        AddButton("Copy run command", () => { CopyCommand(); return Task.CompletedTask; });
+        }));
+        _actions.Controls.Add(AddButton("Set shortcut...", () => { SetShortcut(); return Task.CompletedTask; }));
+        _actions.Controls.Add(AddButton("Desktop after run...", () => { SetFinishDesktop(); return Task.CompletedTask; }));
+        _actions.Controls.Add(AddButton("Rename", () => { Rename(); return Task.CompletedTask; }));
+        _actions.Controls.Add(AddButton("Copy run command", () => { CopyCommand(); return Task.CompletedTask; }));
+        _actions.Controls.Add(AddButton("Delete", () => { Delete(); return Task.CompletedTask; }));
 
-        var left = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
-        left.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        left.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        left.Controls.Add(_list, 0, 0);
-        left.Controls.Add(_buttons, 1, 0);
-
-        var split = new SplitContainer { Dock = DockStyle.Fill };
-        split.Panel1.Controls.Add(left);
-        split.Panel2.Controls.Add(_grid);
-        split.Panel2.Controls.Add(new Label
+        // Header: brand on the left, the main action on the right, a two-tone line underneath.
+        var brand = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
+        brand.Controls.Add(new LogoMark { Margin = new Padding(0, 2, 10, 0) });
+        brand.Controls.Add(new Label { Text = "FastFlow", AutoSize = true, Font = Theme.Brand, Margin = Padding.Empty });
+        var header = new TableLayoutPanel
         {
-            Text = "Windows in this workflow (edit cells to tweak; uncheck Enabled to skip a window):",
-            Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(0, 0, 0, 4),
-        });
+            Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, RowCount = 2, Margin = new Padding(0, 0, 0, 20),
+        };
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        header.Controls.Add(brand, 0, 0);
+        header.Controls.Add(capture, 1, 0);
+        var hero = new TwoToneLabel
+        {
+            Font = Theme.Hero, ForeColor = Theme.Ink, Margin = new Padding(0, 16, 0, 0),
+            Strong = "Save your workspace,", Soft = " restore it in one click",
+        };
+        header.Controls.Add(hero, 0, 1);
+        header.SetColumnSpan(hero, 2);
 
-        var bottom = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2 };
-        bottom.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        bottom.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        // Left column: the workflows, then the options.
+        var listHeader = new Panel { Dock = DockStyle.Top, Height = 34 };
+        listHeader.Controls.Add(_listTitle);
+        var listCard = new Card { Dock = DockStyle.Fill, Padding = new Padding(14, 18, 14, 14), Margin = new Padding(0, 0, 16, 16) };
+        _listTitle.Location = new Point(6, 0);
+        _emptyList.Padding = new Padding(6, 0, 0, 0);
+        listCard.Controls.Add(_list);
+        listCard.Controls.Add(_emptyList);
+        listCard.Controls.Add(listHeader);
+
         _closeOthers.Checked = _settings.CloseOtherApps;
         _reuse.Checked = _settings.ReuseOpenWindows;
         RefreshStartupEntry();
@@ -122,8 +167,11 @@ internal sealed class MainForm : Form
         _closeOthers.CheckedChanged += (_, _) => { _settings.CloseOtherApps = _closeOthers.Checked; SaveSettings(); };
         _reuse.CheckedChanged += (_, _) => { _settings.ReuseOpenWindows = _reuse.Checked; SaveSettings(); };
         _startup.CheckedChanged += (_, _) => SetStartup(_startup.Checked);
+        _tips.SetToolTip(_closeOthers, "Closes the apps on every virtual desktop first, so the workflow starts from a clean slate.");
+        _tips.SetToolTip(_reuse, "Keeps a window of an app the workflow also uses and moves it into place instead of relaunching it.");
+        _tips.SetToolTip(_startup, "Starts FastFlow hidden in the tray at sign-in, so workflow shortcuts always work.");
 
-        var keepOpen = new Button { AutoSize = true, Margin = new Padding(0, 0, 12, 0) };
+        var keepOpen = new PillButton { Radius = 12, Margin = new Padding(47, 0, 0, 6), Font = Theme.SmallMedium };
         void ShowKeepOpenCount() => keepOpen.Text = $"Apps to keep open ({_settings.KeepOpenApps.Count})...";
         ShowKeepOpenCount();
         keepOpen.Enabled = _closeOthers.Checked;
@@ -138,36 +186,225 @@ internal sealed class MainForm : Form
             Log(apps.Count == 0 ? "No apps are kept open." : $"Apps kept open when a workflow runs: {string.Join(", ", apps)}");
         };
 
-        var options = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+        var options = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
+        options.Controls.Add(new Label { Text = "Options", AutoSize = true, Font = Theme.Heading, Margin = new Padding(0, 0, 0, 8) });
         options.Controls.Add(_closeOthers);
         options.Controls.Add(keepOpen);
         options.Controls.Add(_reuse);
         options.Controls.Add(_startup);
         options.Controls.Add(new Label
         {
-            Text = _desktops.Status, AutoSize = true, Padding = new Padding(16, 4, 0, 0),
-            ForeColor = _desktops.CanMoveWindows ? SystemColors.GrayText : Color.DarkOrange,
+            Text = _desktops.Status, AutoSize = true, Font = Theme.Small, MaximumSize = new Size(290, 0),
+            Margin = new Padding(0, 8, 0, 0),
+            ForeColor = _desktops.CanMoveWindows ? Theme.Muted : Theme.Warning,
         });
-        bottom.Controls.Add(options, 0, 0);
-        bottom.Controls.Add(_log, 0, 1);
+        var optionsCard = new Card { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 16, 0) };
+        optionsCard.Controls.Add(options);
 
-        var root = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal };
-        root.Panel1.Controls.Add(split);
-        root.Panel2.Controls.Add(bottom);
+        // Right column: the selected workflow, then the activity log.
+        var titleBlock = new FlowLayoutPanel
+        {
+            AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = Padding.Empty,
+        };
+        titleBlock.Controls.Add(_title);
+        titleBlock.Controls.Add(_summary);
+        var gridCard = new Card { Dock = DockStyle.Fill, Fill = Color.White, Radius = 18, Padding = new Padding(8, 6, 8, 8) };
+        gridCard.Controls.Add(_grid);
+        var detail = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 4 };
+        detail.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        detail.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        detail.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        detail.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        detail.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        detail.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        detail.Controls.Add(titleBlock, 0, 0);
+        detail.Controls.Add(_runButton, 1, 0);
+        detail.Controls.Add(_actions, 0, 1);
+        detail.SetColumnSpan(_actions, 2);
+        var gridHint = new Label
+        {
+            AutoSize = true, Font = Theme.Small, ForeColor = Theme.Muted, Margin = new Padding(2, 0, 0, 8),
+            Text = "Windows in this workflow  ·  edit cells to tweak, uncheck Enabled to skip a window",
+        };
+        detail.Controls.Add(gridHint, 0, 2);
+        detail.SetColumnSpan(gridHint, 2);
+        detail.Controls.Add(gridCard, 0, 3);
+        detail.SetColumnSpan(gridCard, 2);
+        var detailCard = new Card { Dock = DockStyle.Fill, Padding = new Padding(24, 22, 20, 20), Margin = new Padding(0, 0, 0, 16) };
+        detailCard.Controls.Add(detail);
+
+        var logCard = new Card { Dock = DockStyle.Fill, Padding = new Padding(20, 18, 8, 12) };
+        logCard.Controls.Add(_log);
+        logCard.Controls.Add(new Label
+        {
+            Text = "Activity", AutoSize = true, Font = Theme.Heading, Dock = DockStyle.Top, Padding = new Padding(0, 0, 0, 10),
+        });
+
+        var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2 };
+        body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 350));
+        body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        body.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 264));
+        body.Controls.Add(listCard, 0, 0);
+        body.Controls.Add(optionsCard, 0, 1);
+        body.Controls.Add(detailCard, 1, 0);
+        body.Controls.Add(logCard, 1, 1);
+
+        var root = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(28, 18, 28, 28),
+        };
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.Controls.Add(header, 0, 0);
+        root.Controls.Add(body, 0, 1);
         Controls.Add(root);
 
         Load += (_, _) =>
         {
-            // Splitter distances can only be set once the containers have their real size.
-            root.SplitterDistance = (int)(ClientSize.Height * 0.68);
-            split.SplitterDistance = 440;
+            // Keep the window on screen on small or highly scaled displays.
+            var area = Screen.FromControl(this).WorkingArea;
+            Size = new Size(Math.Min(Width, area.Width), Math.Min(Height, area.Height));
+            CenterToScreen();
+            ApplyDpiMetrics();
         };
+        DpiChanged += (_, _) => BeginInvoke(ApplyDpiMetrics);
         Shown += async (_, _) => await AutoRunAsync();
         FormClosing += OnFormClosing;
 
         SetUpTray();
+        ShowListState();
         ShowSelected();
         Log($"Workflows are stored in {_store.FilePath}");
+    }
+
+    private void StyleGrid()
+    {
+        _grid.BorderStyle = BorderStyle.None;
+        _grid.BackgroundColor = Color.White;
+        _grid.GridColor = Theme.Line;
+        _grid.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
+        _grid.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None;
+        _grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
+        _grid.EnableHeadersVisualStyles = false;
+        _grid.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
+        {
+            BackColor = Color.White, ForeColor = Theme.Muted, Font = Theme.SmallMedium,
+            SelectionBackColor = Color.White, SelectionForeColor = Theme.Muted,
+            Padding = new Padding(6, 0, 6, 0), WrapMode = DataGridViewTriState.False,
+        };
+        _grid.DefaultCellStyle = new DataGridViewCellStyle
+        {
+            BackColor = Color.White, ForeColor = Theme.Ink, Font = Theme.Body,
+            SelectionBackColor = Theme.Card, SelectionForeColor = Theme.Ink,
+            Padding = new Padding(6, 0, 6, 0),
+        };
+    }
+
+    /// <summary>Row and item heights in device pixels; the layout itself is scaled by WinForms.</summary>
+    private void ApplyDpiMetrics()
+    {
+        _list.ItemHeight = Math.Min(255, LogicalToDeviceUnits(64));
+        _grid.ColumnHeadersHeight = LogicalToDeviceUnits(38);
+        _grid.RowTemplate.Height = LogicalToDeviceUnits(36);
+        ShowSelected();
+    }
+
+    private void ShowListState()
+    {
+        _listTitle.Soft = _workflows.Count == 0 ? "" : $"  {_workflows.Count}";
+        _emptyList.Visible = _workflows.Count == 0;
+        UpdateCommands();
+    }
+
+    private void UpdateCommands()
+    {
+        // Binding the list selects its first item while the constructor is still building the window.
+        if (_runButton == null)
+            return;
+        foreach (var (button, needsSelection) in _commands)
+            button.Enabled = !_running && (!needsSelection || Selected != null);
+        _runButton.Text = _running ? "Running..." : "Run workflow";
+    }
+
+    private void DrawWorkflow(object? sender, DrawItemEventArgs e)
+    {
+        var g = e.Graphics;
+        using (var back = new SolidBrush(_list.BackColor))
+            g.FillRectangle(back, e.Bounds);
+        if (e.Index < 0 || e.Index >= _list.Items.Count || _list.Items[e.Index] is not Workflow wf)
+            return;
+
+        int Px(int value) => _list.LogicalToDeviceUnits(value);
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        var item = Rectangle.Inflate(e.Bounds, 0, -Px(3));
+        if ((e.State & DrawItemState.Selected) != 0)
+            Theme.FillRounded(g, Color.White, item, Px(16));
+
+        const TextFormatFlags flags = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine
+                                      | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix;
+        var left = item.Left + Px(16);
+        var right = item.Right - Px(14);
+
+        // Shortcut as a key cap on the right.
+        if (wf.GetHotkey() is { } hotkey)
+        {
+            var text = hotkey.ToString();
+            var size = TextRenderer.MeasureText(g, text, Theme.SmallMedium, Size.Empty, TextFormatFlags.NoPadding);
+            var cap = new Rectangle(right - size.Width - Px(16), item.Top + (item.Height - Px(24)) / 2,
+                size.Width + Px(16), Px(24));
+            Theme.FillRounded(g, Theme.Chip, cap, Px(7));
+            TextRenderer.DrawText(g, text, Theme.SmallMedium, cap, Theme.Ink,
+                flags | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            right = cap.Left - Px(10);
+        }
+
+        var nameHeight = TextRenderer.MeasureText(g, "Ag", Theme.BodyMedium, Size.Empty, flags).Height;
+        var infoHeight = TextRenderer.MeasureText(g, "Ag", Theme.Small, Size.Empty, flags).Height;
+        var top = item.Top + (item.Height - nameHeight - Px(3) - infoHeight) / 2;
+        TextRenderer.DrawText(g, wf.Name, Theme.BodyMedium,
+            new Rectangle(left, top, right - left, nameHeight), Theme.Ink, flags);
+        TextRenderer.DrawText(g, Describe(wf, withShortcut: false), Theme.Small,
+            new Rectangle(left, top + nameHeight + Px(3), right - left, infoHeight), Theme.Muted, flags);
+    }
+
+    private static string Describe(Workflow wf, bool withShortcut)
+    {
+        var parts = new List<string>
+        {
+            wf.Windows.Count == 1 ? "1 window" : $"{wf.Windows.Count} windows",
+        };
+        var desktops = wf.Windows.Select(w => w.DesktopIndex).Distinct().Count();
+        if (desktops > 0)
+            parts.Add(desktops == 1 ? "1 desktop" : $"{desktops} desktops");
+        if (withShortcut)
+        {
+            if (wf.GetHotkey() is { } hotkey)
+                parts.Add(hotkey.ToString());
+            parts.Add(wf.FinishDesktop switch
+            {
+                Workflow.FinishDesktopAutomatic => "ends on its desktop",
+                Workflow.FinishDesktopStay => "stays on the current desktop",
+                var number => $"ends on desktop {number}",
+            });
+            parts.Add($"captured {wf.CreatedAt:d MMM yyyy}");
+        }
+        return string.Join("  ·  ", parts);
+    }
+
+    private void ShowDetails()
+    {
+        if (Selected is { } wf)
+        {
+            _title.Text = wf.Name;
+            _summary.Text = Describe(wf, withShortcut: true);
+        }
+        else
+        {
+            _title.Text = "No workflow selected";
+            _summary.Text = "Arrange your apps across your desktops, then click Capture new workflow.";
+        }
+        UpdateCommands();
     }
 
     private Workflow? Selected => _list.SelectedItem as Workflow;
@@ -212,9 +449,9 @@ internal sealed class MainForm : Form
         base.WndProc(ref m);
     }
 
-    private void AddButton(string text, Func<Task> action)
+    private PillButton AddButton(string text, Func<Task> action, bool primary = false, bool needsSelection = true)
     {
-        var button = new Button { Text = text, Width = 170, Height = 32 };
+        var button = new PillButton { Text = text, Primary = primary };
         button.Click += async (_, _) =>
         {
             if (_running)
@@ -229,7 +466,8 @@ internal sealed class MainForm : Form
                 MessageBox.Show(this, ex.Message, "FastFlow", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         };
-        _buttons.Controls.Add(button);
+        _commands[button] = needsSelection;
+        return button;
     }
 
     private List<Workflow> LoadWorkflows()
@@ -273,6 +511,7 @@ internal sealed class MainForm : Form
     private void ShowSelected()
     {
         _grid.DataSource = Selected == null ? null : new BindingList<WindowEntry>(Selected.Windows);
+        ShowDetails();
     }
 
     private async Task CaptureAsync(Workflow? replace)
@@ -332,7 +571,7 @@ internal sealed class MainForm : Form
         if (_running)
             return;
         _running = true;
-        _buttons.Enabled = false;
+        UpdateCommands();
         try
         {
             var (restored, total) = await new WorkflowRunner(_desktops, Log)
@@ -349,7 +588,7 @@ internal sealed class MainForm : Form
         finally
         {
             _running = false;
-            _buttons.Enabled = true;
+            UpdateCommands();
         }
     }
 
@@ -382,6 +621,7 @@ internal sealed class MainForm : Form
         wf.Name = name;
         _workflows.ResetItem(_workflows.IndexOf(wf));
         SaveAll();
+        ShowDetails();
     }
 
     private void Delete()
@@ -434,6 +674,7 @@ internal sealed class MainForm : Form
         _workflows.ResetItem(_workflows.IndexOf(wf));
         SaveAll();
         RegisterHotkeys();
+        ShowDetails();
         Log(hotkey.IsEmpty
             ? $"Removed the shortcut of \"{wf.Name}\"."
             : $"\"{wf.Name}\" now runs with {hotkey} from anywhere (while FastFlow is open or in the tray).");
@@ -451,6 +692,7 @@ internal sealed class MainForm : Form
 
         wf.FinishDesktop = choice;
         SaveAll();
+        ShowDetails();
         Log(choice switch
         {
             Workflow.FinishDesktopAutomatic => $"\"{wf.Name}\" switches to its desktop after running if all of its apps are on one desktop.",
@@ -528,6 +770,7 @@ internal sealed class MainForm : Form
             menu.Items.Add("Exit", null, (_, _) => ExitApplication());
         };
         menu.Items.Add("Exit"); // placeholder so the menu opens; rebuilt in Opening
+        Theme.Apply(menu);
         _tray.ContextMenuStrip = menu;
         _tray.DoubleClick += (_, _) => ShowFromTray();
         _tray.Visible = _autoRunName == null;

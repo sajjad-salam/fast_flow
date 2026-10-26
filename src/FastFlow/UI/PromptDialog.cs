@@ -7,26 +7,29 @@ internal sealed class PromptDialog : Form
 
     private PromptDialog(string title, string label, string initial)
     {
+        Theme.Apply(this);
         Text = title;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = MaximizeBox = false;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        Padding = new Padding(12);
+        Padding = new Padding(24, 20, 24, 20);
 
         var layout = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Dock = DockStyle.Fill };
-        layout.Controls.Add(new Label { Text = label, AutoSize = true, Margin = new Padding(0, 0, 0, 6) }, 0, 0);
+        layout.Controls.Add(new Label { Text = label, AutoSize = true, Font = Theme.BodyMedium, Margin = new Padding(0, 0, 0, 10) }, 0, 0);
         layout.SetColumnSpan(layout.GetControlFromPosition(0, 0)!, 2);
 
-        _input = new TextBox { Text = initial, Width = 320 };
-        layout.Controls.Add(_input, 0, 1);
-        layout.SetColumnSpan(_input, 2);
+        _input = new TextBox { Text = initial };
+        var field = new FieldBox(_input, 360);
+        layout.Controls.Add(field, 0, 1);
+        layout.SetColumnSpan(field, 2);
 
-        var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, AutoSize = true, Anchor = AnchorStyles.Right };
-        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, AutoSize = true };
-        layout.Controls.Add(ok, 0, 2);
-        layout.Controls.Add(cancel, 1, 2);
+        var ok = new PillButton { Text = "OK", Primary = true, DialogResult = DialogResult.OK };
+        var cancel = new PillButton { Text = "Cancel", DialogResult = DialogResult.Cancel };
+        var buttons = Theme.ButtonRow(ok, cancel);
+        layout.Controls.Add(buttons, 0, 2);
+        layout.SetColumnSpan(buttons, 2);
 
         Controls.Add(layout);
         AcceptButton = ok;

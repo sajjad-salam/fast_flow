@@ -16,9 +16,9 @@ namespace FastFlow.UI;
 /// </summary>
 internal sealed class ToastWindow : Form
 {
-    private const int CardWidth = 340;
-    private const int CardHeight = 68;
-    private const int CornerRadius = 14;
+    private const int CardWidth = 360;
+    private const int CardHeight = 72;
+    private const int CornerRadius = 20;
     private const int ShadowSize = 10;
     private const int ScreenMargin = 20;
     private const int SlideDistance = 28;
@@ -195,25 +195,25 @@ internal sealed class ToastWindow : Form
                 var r = card;
                 r.Inflate(i, i);
                 r.Offset(0, Px(2));
-                using var path = RoundedRect(r, radius + i);
+                using var path = Theme.RoundedRect(r, radius + i);
                 g.FillPath(ring, path);
             }
         }
 
-        using (var path = RoundedRect(card, radius))
+        using (var path = Theme.RoundedRect(card, radius))
         {
-            using var fill = new SolidBrush(dark ? Color.FromArgb(44, 44, 44) : Color.White);
+            using var fill = new SolidBrush(dark ? Color.FromArgb(32, 30, 30) : Color.White);
             using var border = new Pen(dark ? Color.FromArgb(28, 255, 255, 255) : Color.FromArgb(18, 0, 0, 0), Math.Max(1, Px(1)));
             g.FillPath(fill, path);
             g.DrawPath(border, path);
         }
 
-        // Check mark badge.
-        var badgeSize = Px(30);
+        // Check mark badge, in the near-black of FastFlow's buttons.
+        var badgeSize = Px(32);
         var badge = new RectangleF(card.Left + Px(18), card.Top + (card.Height - badgeSize) / 2, badgeSize, badgeSize);
-        using (var green = new SolidBrush(dark ? Color.FromArgb(108, 203, 95) : Color.FromArgb(15, 123, 15)))
-            g.FillEllipse(green, badge);
-        using (var tick = new Pen(dark ? Color.FromArgb(28, 28, 28) : Color.White, Px(2.4f))
+        using (var fill = new SolidBrush(dark ? Color.White : Theme.Primary))
+            g.FillEllipse(fill, badge);
+        using (var tick = new Pen(dark ? Theme.Primary : Color.White, Px(2.4f))
                { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
         {
             g.DrawLines(tick, new[]
@@ -224,8 +224,8 @@ internal sealed class ToastWindow : Form
             });
         }
 
-        using var titleFont = new Font("Segoe UI Semibold", Px(14), GraphicsUnit.Pixel);
-        using var messageFont = new Font("Segoe UI", Px(12.5f), GraphicsUnit.Pixel);
+        using var titleFont = new Font(Theme.BodyMedium.FontFamily, Px(14), GraphicsUnit.Pixel);
+        using var messageFont = new Font(Theme.Body.FontFamily, Px(12.5f), GraphicsUnit.Pixel);
         using var format = new StringFormat(StringFormatFlags.NoWrap) { Trimming = StringTrimming.EllipsisCharacter };
 
         var textLeft = badge.Right + Px(14);
@@ -235,25 +235,13 @@ internal sealed class ToastWindow : Form
         var gap = Px(1);
         var top = card.Top + (card.Height - titleHeight - gap - messageHeight) / 2;
 
-        using (var brush = new SolidBrush(dark ? Color.White : Color.FromArgb(26, 26, 26)))
+        using (var brush = new SolidBrush(dark ? Color.White : Theme.Ink))
             g.DrawString(_title, titleFont, brush, new RectangleF(textLeft, top, textWidth, titleHeight), format);
-        using (var brush = new SolidBrush(dark ? Color.FromArgb(200, 200, 200) : Color.FromArgb(96, 96, 96)))
+        using (var brush = new SolidBrush(dark ? Color.FromArgb(170, 170, 170) : Theme.Muted))
             g.DrawString(_message, messageFont, brush,
                 new RectangleF(textLeft, top + titleHeight + gap, textWidth, messageHeight), format);
 
         return bitmap;
-    }
-
-    private static GraphicsPath RoundedRect(RectangleF r, float radius)
-    {
-        var d = Math.Min(radius * 2, Math.Min(r.Width, r.Height));
-        var path = new GraphicsPath();
-        path.AddArc(r.Left, r.Top, d, d, 180, 90);
-        path.AddArc(r.Right - d, r.Top, d, d, 270, 90);
-        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-        path.AddArc(r.Left, r.Bottom - d, d, d, 90, 90);
-        path.CloseFigure();
-        return path;
     }
 
     /// <summary>Follows the Windows (taskbar / notification) colour mode.</summary>

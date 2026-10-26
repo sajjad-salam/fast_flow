@@ -8,47 +8,52 @@ internal sealed class HotkeyDialog : Form
 {
     private readonly TextBox _input;
     private readonly Label _hint;
-    private readonly Button _ok;
+    private readonly PillButton _ok;
     private Hotkey _hotkey;
 
     private HotkeyDialog(string workflowName, Hotkey? current)
     {
+        Theme.Apply(this);
         Text = "Workflow shortcut";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = MaximizeBox = false;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        Padding = new Padding(12);
+        Padding = new Padding(24, 20, 24, 20);
 
         var layout = new TableLayoutPanel { ColumnCount = 3, AutoSize = true, Dock = DockStyle.Fill };
         var label = new Label
         {
             Text = $"Press the shortcut that should run \"{workflowName}\" from anywhere\n"
                    + "(Ctrl / Alt / Shift / Win plus a key, e.g. Ctrl+Alt+1 or Ctrl+Alt+Shift+F5):",
-            AutoSize = true, Margin = new Padding(0, 0, 0, 6),
+            AutoSize = true, Margin = new Padding(0, 0, 0, 12),
         };
         layout.Controls.Add(label, 0, 0);
         layout.SetColumnSpan(label, 3);
 
-        _input = new TextBox { Width = 360, ReadOnly = true, BackColor = SystemColors.Window, ShortcutsEnabled = false };
+        _input = new TextBox
+        {
+            ReadOnly = true, ShortcutsEnabled = false, Font = Theme.Heading, TextAlign = HorizontalAlignment.Center,
+        };
         _input.PreviewKeyDown += (_, e) => e.IsInputKey = true; // so Tab, arrows etc. can be recorded too
         _input.KeyDown += OnKeyDown;
         _input.KeyUp += (_, _) => { if (!_hotkey.IsValid) ShowCurrent(); };
-        layout.Controls.Add(_input, 0, 1);
-        layout.SetColumnSpan(_input, 3);
+        var field = new FieldBox(_input, 420) { Padding = new Padding(12, 14, 12, 14) };
+        layout.Controls.Add(field, 0, 1);
+        layout.SetColumnSpan(field, 3);
 
-        _hint = new Label { AutoSize = true, ForeColor = SystemColors.GrayText, Margin = new Padding(0, 4, 0, 8) };
+        _hint = new Label { AutoSize = true, ForeColor = Theme.Muted, Font = Theme.Small, Margin = new Padding(2, 6, 0, 0) };
         layout.Controls.Add(_hint, 0, 2);
         layout.SetColumnSpan(_hint, 3);
 
-        _ok = new Button { Text = "OK", DialogResult = DialogResult.OK, AutoSize = true };
-        var clear = new Button { Text = "Remove shortcut", AutoSize = true };
+        _ok = new PillButton { Text = "OK", Primary = true, DialogResult = DialogResult.OK };
+        var clear = new PillButton { Text = "Remove shortcut" };
         clear.Click += (_, _) => { _hotkey = default; DialogResult = DialogResult.OK; };
-        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, AutoSize = true };
-        layout.Controls.Add(_ok, 0, 3);
-        layout.Controls.Add(clear, 1, 3);
-        layout.Controls.Add(cancel, 2, 3);
+        var cancel = new PillButton { Text = "Cancel", DialogResult = DialogResult.Cancel };
+        var buttons = Theme.ButtonRow(clear, _ok, cancel);
+        layout.Controls.Add(buttons, 0, 3);
+        layout.SetColumnSpan(buttons, 3);
 
         Controls.Add(layout);
         CancelButton = cancel;
