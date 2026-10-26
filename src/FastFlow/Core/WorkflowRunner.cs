@@ -6,11 +6,12 @@ using static FastFlow.Native.NativeMethods;
 namespace FastFlow.Core;
 
 /// <summary>
-/// Restores a <see cref="Workflow"/>: launches each app, waits for its window, then puts the window
+/// Restores a <see cref="Workflow"/>: launches the apps, waits for their windows, then puts each window
 /// on its virtual desktop at its saved size and position.
 ///
 /// Runs on the UI thread (awaiting delays keeps the UI responsive) because the shell's virtual
-/// desktop COM objects must be called from the STA thread that created them.
+/// desktop COM objects must be called from the STA thread that created them. The apps are restored in
+/// parallel, but only ever interleave at awaits on that one thread, so they share state without locks.
 /// </summary>
 internal sealed class WorkflowRunner
 {
@@ -77,37 +78,47 @@ internal sealed class WorkflowRunner
         }
 
         var preExisting = WindowEnumerator.GetAppWindows().Select(w => w.Handle).ToHashSet();
+        var windows = new WindowSnapshot();
         var placed = new List<(WindowEntry Entry, IntPtr Handle)>();
 
-        foreach (var entry in entries)
+        // Restores the windows of one app, one after the other.
+        async Task RestoreAsync(IEnumerable<WindowEntry> appEntries)
         {
-            token.ThrowIfCancellationRequested();
-
-            IntPtr? hwnd = null;
-            if (reused.TryGetValue(entry, out var open) && IsWindow(open))
+            foreach (var entry in appEntries)
             {
-                hwnd = open;
-                _log($"  {entry.ProcessName}: reusing open window \"{WindowEnumerator.GetTitle(open)}\"");
-            }
+                token.ThrowIfCancellationRequested();
 
-            if (hwnd == null)
-            {
-                if (!Launch(entry))
-                    continue;
-                hwnd = await WaitForNewWindowAsync(entry, preExisting, claimed, token);
+                IntPtr? hwnd = null;
+                if (reused.TryGetValue(entry, out var open) && IsWindow(open))
+                {
+                    hwnd = open;
+                    _log($"  {entry.ProcessName}: reusing open window \"{WindowEnumerator.GetTitle(open)}\"");
+                }
+
                 if (hwnd == null)
                 {
-                    _log($"  {entry.ProcessName}: no window appeared within {WindowTimeout.TotalSeconds:0}s, skipped.");
-                    continue;
+                    if (!Launch(entry))
+                        continue;
+                    hwnd = await WaitForNewWindowAsync(entry, preExisting, claimed, windows, token);
+                    if (hwnd == null)
+                    {
+                        _log($"  {entry.ProcessName}: no window appeared within {WindowTimeout.TotalSeconds:0}s, skipped.");
+                        continue;
+                    }
+                    // Give the app a moment to finish restoring its own saved layout before we override it.
+                    await Task.Delay(500, token);
                 }
-                // Give the app a moment to finish restoring its own saved layout before we override it.
-                await Task.Delay(500, token);
-            }
 
-            claimed.Add(hwnd.Value);
-            Apply(entry, hwnd.Value, firstPass: true);
-            placed.Add((entry, hwnd.Value));
+                claimed.Add(hwnd.Value);
+                Apply(entry, hwnd.Value, firstPass: true);
+                placed.Add((entry, hwnd.Value));
+            }
         }
+
+        // Start every app at once and place each window as soon as it appears. Windows of the same app
+        // (two browser windows, two folders, ...) still go one at a time, so that each new window is
+        // matched to the right entry.
+        await Task.WhenAll(entries.GroupBy(AppKey, StringComparer.OrdinalIgnoreCase).Select(RestoreAsync));
 
         // Take the user to the desktop chosen for this workflow, or – by default – to the desktop of a
         // layout that lives on a single desktop, wherever they started the run from.
@@ -153,6 +164,10 @@ internal sealed class WorkflowRunner
         // explorer.exe also owns the taskbar etc.; only folder windows count.
         return entry.WindowClass != "CabinetWClass" || window.ClassName == "CabinetWClass";
     }
+
+    /// <summary>Entries with the same key are windows of the same app and cannot be told apart while launching.</summary>
+    private static string AppKey(WindowEntry entry) =>
+        entry.IsPackaged ? entry.AppUserModelId : entry.ExecutablePath;
 
     private static IntPtr? FindOpenWindow(WindowEntry entry, HashSet<IntPtr> claimed)
     {
@@ -202,14 +217,14 @@ internal sealed class WorkflowRunner
     }
 
     private static async Task<IntPtr?> WaitForNewWindowAsync(
-        WindowEntry entry, HashSet<IntPtr> preExisting, HashSet<IntPtr> claimed, CancellationToken token)
+        WindowEntry entry, HashSet<IntPtr> preExisting, HashSet<IntPtr> claimed, WindowSnapshot windows, CancellationToken token)
     {
         var timer = Stopwatch.StartNew();
         while (timer.Elapsed < WindowTimeout)
         {
             await Task.Delay(PollInterval, token);
 
-            var candidates = WindowEnumerator.GetAppWindows()
+            var candidates = windows.Get()
                 .Where(w => !preExisting.Contains(w.Handle) && !claimed.Contains(w.Handle) && Matches(entry, w))
                 .ToList();
 
@@ -218,9 +233,30 @@ internal sealed class WorkflowRunner
             if (match == null && timer.Elapsed > ClassMismatchGrace)
                 match = candidates.FirstOrDefault();
             if (match != null)
+            {
+                // Claim it before awaiting anything, so that no other app being waited for can take it.
+                claimed.Add(match.Handle);
                 return match.Handle;
+            }
         }
         return null;
+    }
+
+    /// <summary>The open app windows, enumerated at most once per poll however many apps are being waited for.</summary>
+    private sealed class WindowSnapshot
+    {
+        private readonly Stopwatch _age = new();
+        private List<WindowInfo> _windows = new();
+
+        public List<WindowInfo> Get()
+        {
+            if (!_age.IsRunning || _age.Elapsed >= PollInterval / 2)
+            {
+                _windows = WindowEnumerator.GetAppWindows();
+                _age.Restart();
+            }
+            return _windows;
+        }
     }
 
     private void Apply(WindowEntry entry, IntPtr hwnd, bool firstPass)
