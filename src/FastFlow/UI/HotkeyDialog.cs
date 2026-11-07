@@ -11,10 +11,10 @@ internal sealed class HotkeyDialog : Form
     private readonly PillButton _ok;
     private Hotkey _hotkey;
 
-    private HotkeyDialog(string workflowName, Hotkey? current)
+    private HotkeyDialog(string title, string prompt, Hotkey? current)
     {
         Theme.Apply(this);
-        Text = "Workflow shortcut";
+        Text = title;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = MaximizeBox = false;
@@ -25,8 +25,7 @@ internal sealed class HotkeyDialog : Form
         var layout = new TableLayoutPanel { ColumnCount = 3, AutoSize = true, Dock = DockStyle.Fill };
         var label = new Label
         {
-            Text = $"Press the shortcut that should run \"{workflowName}\" from anywhere\n"
-                   + "(Ctrl / Alt / Shift / Win plus a key, e.g. Ctrl+Alt+1 or Ctrl+Alt+Shift+F5):",
+            Text = prompt,
             AutoSize = true, Margin = new Padding(0, 0, 0, 12),
         };
         layout.Controls.Add(label, 0, 0);
@@ -63,9 +62,16 @@ internal sealed class HotkeyDialog : Form
     }
 
     /// <summary>Returns the recorded shortcut, an empty <see cref="Hotkey"/> to remove it, or null if cancelled.</summary>
-    public static Hotkey? Show(IWin32Window owner, string workflowName, Hotkey? current)
+    public static Hotkey? Show(IWin32Window owner, string workflowName, Hotkey? current) =>
+        Show(owner, "Workflow shortcut",
+            $"Press the shortcut that should run \"{workflowName}\" from anywhere\n"
+            + "(Ctrl / Alt / Shift / Win plus a key, e.g. Ctrl+Alt+1 or Ctrl+Alt+Shift+F5):",
+            current);
+
+    /// <inheritdoc cref="Show(IWin32Window, string, Hotkey?)"/>
+    public static Hotkey? Show(IWin32Window owner, string title, string prompt, Hotkey? current)
     {
-        using var dialog = new HotkeyDialog(workflowName, current);
+        using var dialog = new HotkeyDialog(title, prompt, current);
         return dialog.ShowDialog(owner) == DialogResult.OK ? dialog._hotkey : null;
     }
 

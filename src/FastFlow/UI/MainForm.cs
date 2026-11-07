@@ -24,6 +24,10 @@ internal sealed class MainForm : Form
     private readonly NotifyIcon _tray = new() { Text = "FastFlow", Icon = Theme.AppIcon };
     private readonly Dictionary<int, Workflow> _hotkeys = new();
 
+    /// <summary>RegisterHotKey id of the minimize/close mode shortcut; workflow shortcuts count up from 1.</summary>
+    private const int ModeHotkeyId = 0xB000;
+    private bool _modeHotkeyRegistered;
+
     private readonly ListBox _list = new()
     {
         Dock = DockStyle.Fill, IntegralHeight = false, BorderStyle = BorderStyle.None,
@@ -47,6 +51,7 @@ internal sealed class MainForm : Form
     {
         Text = "Minimize them instead (faster switching)", Margin = new Padding(47, 0, 0, 4),
     };
+    private readonly PillButton _modeShortcut = new() { Radius = 12, Margin = new Padding(47, 0, 0, 6), Font = Theme.SmallMedium };
     private readonly ToggleSwitch _reuse = new() { Text = "Reuse windows that are already open" };
     private readonly ToggleSwitch _startup = new() { Text = "Start with Windows" };
     private readonly ToolTip _tips = new();
@@ -178,6 +183,9 @@ internal sealed class MainForm : Form
         _tips.SetToolTip(_closeOthers, "Closes the apps on every virtual desktop first, so the workflow starts from a clean slate.");
         _tips.SetToolTip(_minimize, "Minimizes the apps the workflow doesn't use instead of closing them. Switching back to a "
                                     + "workflow then restores its windows (browser tabs included) instead of relaunching them.");
+        ShowModeShortcut();
+        _modeShortcut.Click += (_, _) => SetModeShortcut();
+        _tips.SetToolTip(_modeShortcut, "A keyboard shortcut that switches between minimizing and closing the other apps, from anywhere.");
         _tips.SetToolTip(_reuse, "Keeps a window of an app the workflow also uses and moves it into place instead of relaunching it.");
         _tips.SetToolTip(_startup, "Starts FastFlow hidden in the tray at sign-in, so workflow shortcuts always work.");
 
@@ -200,6 +208,7 @@ internal sealed class MainForm : Form
         options.Controls.Add(new Label { Text = "Options", AutoSize = true, Font = Theme.Heading, Margin = new Padding(0, 0, 0, 8) });
         options.Controls.Add(_closeOthers);
         options.Controls.Add(_minimize);
+        options.Controls.Add(_modeShortcut);
         options.Controls.Add(keepOpen);
         options.Controls.Add(_reuse);
         options.Controls.Add(_startup);
@@ -255,7 +264,7 @@ internal sealed class MainForm : Form
         body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 350));
         body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         body.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 264));
+        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 300));
         body.Controls.Add(listCard, 0, 0);
         body.Controls.Add(optionsCard, 0, 1);
         body.Controls.Add(detailCard, 1, 0);
@@ -447,6 +456,11 @@ internal sealed class MainForm : Form
 
     protected override void WndProc(ref Message m)
     {
+        if (m.Msg == WM_HOTKEY && m.WParam.ToInt32() == ModeHotkeyId)
+        {
+            ToggleMinimizeMode();
+            return;
+        }
         if (m.Msg == WM_HOTKEY && _hotkeys.TryGetValue(m.WParam.ToInt32(), out var workflow))
         {
             _ = RunFromShortcutAsync(workflow);
@@ -669,6 +683,17 @@ internal sealed class MainForm : Form
 
         if (!hotkey.IsEmpty)
         {
+            if (GetModeHotkey() == hotkey)
+            {
+                if (MessageBox.Show(this, $"{hotkey} is already the shortcut that switches between minimizing and closing apps. "
+                                          + $"Move it to \"{wf.Name}\"?",
+                        "FastFlow", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                    return;
+                _settings.ModeShortcut = "";
+                SaveSettings();
+                ShowModeShortcut();
+            }
+
             var other = _workflows.FirstOrDefault(w => w != wf && w.GetHotkey() == hotkey);
             if (other != null
                 && MessageBox.Show(this, $"{hotkey} is already the shortcut of \"{other.Name}\". Move it to \"{wf.Name}\"?",
@@ -725,17 +750,28 @@ internal sealed class MainForm : Form
             if (workflow.GetHotkey() is not { } hotkey)
                 continue;
 
-            uint modifiers = MOD_NOREPEAT;
-            if (hotkey.Modifiers.HasFlag(HotkeyModifiers.Ctrl)) modifiers |= MOD_CONTROL;
-            if (hotkey.Modifiers.HasFlag(HotkeyModifiers.Alt)) modifiers |= MOD_ALT;
-            if (hotkey.Modifiers.HasFlag(HotkeyModifiers.Shift)) modifiers |= MOD_SHIFT;
-            if (hotkey.Modifiers.HasFlag(HotkeyModifiers.Win)) modifiers |= MOD_WIN;
-
-            if (RegisterHotKey(Handle, id, modifiers, (uint)hotkey.Key))
+            if (RegisterHotKey(Handle, id, ToNativeModifiers(hotkey), (uint)hotkey.Key))
                 _hotkeys[id++] = workflow;
             else
                 Log($"Shortcut {hotkey} for \"{workflow.Name}\" could not be registered – another app or Windows already uses it. Pick a different one.");
         }
+
+        if (GetModeHotkey() is { } modeHotkey)
+        {
+            _modeHotkeyRegistered = RegisterHotKey(Handle, ModeHotkeyId, ToNativeModifiers(modeHotkey), (uint)modeHotkey.Key);
+            if (!_modeHotkeyRegistered)
+                Log($"Shortcut {modeHotkey} for switching between minimize and close could not be registered – another app or Windows already uses it. Pick a different one.");
+        }
+    }
+
+    private static uint ToNativeModifiers(Hotkey hotkey)
+    {
+        uint modifiers = MOD_NOREPEAT;
+        if (hotkey.Modifiers.HasFlag(HotkeyModifiers.Ctrl)) modifiers |= MOD_CONTROL;
+        if (hotkey.Modifiers.HasFlag(HotkeyModifiers.Alt)) modifiers |= MOD_ALT;
+        if (hotkey.Modifiers.HasFlag(HotkeyModifiers.Shift)) modifiers |= MOD_SHIFT;
+        if (hotkey.Modifiers.HasFlag(HotkeyModifiers.Win)) modifiers |= MOD_WIN;
+        return modifiers;
     }
 
     private void UnregisterHotkeys()
@@ -743,6 +779,68 @@ internal sealed class MainForm : Form
         foreach (var id in _hotkeys.Keys)
             UnregisterHotKey(Handle, id);
         _hotkeys.Clear();
+        if (_modeHotkeyRegistered)
+            UnregisterHotKey(Handle, ModeHotkeyId);
+        _modeHotkeyRegistered = false;
+    }
+
+    private Hotkey? GetModeHotkey() => Hotkey.TryParse(_settings.ModeShortcut, out var hotkey) ? hotkey : null;
+
+    private void ShowModeShortcut() =>
+        _modeShortcut.Text = GetModeHotkey() is { } hotkey ? $"Mode shortcut: {hotkey}..." : "Set mode shortcut...";
+
+    private void SetModeShortcut()
+    {
+        // Suspend the global shortcuts while recording, otherwise pressing one would trigger it.
+        UnregisterHotkeys();
+        Hotkey? result;
+        try
+        {
+            result = HotkeyDialog.Show(this, "Mode shortcut",
+                "Press the shortcut that switches between minimizing and closing the other apps, from anywhere\n"
+                + "(Ctrl / Alt / Shift / Win plus a key, e.g. Ctrl+Alt+M or Ctrl+Shift+F9):",
+                GetModeHotkey());
+        }
+        finally
+        {
+            RegisterHotkeys();
+        }
+        if (result is not { } hotkey)
+            return;
+
+        if (!hotkey.IsEmpty && _workflows.FirstOrDefault(w => w.GetHotkey() == hotkey) is { } other)
+        {
+            if (MessageBox.Show(this, $"{hotkey} is already the shortcut of \"{other.Name}\". Use it to switch modes instead?",
+                    "FastFlow", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                return;
+            other.Shortcut = "";
+            _workflows.ResetItem(_workflows.IndexOf(other));
+            SaveAll();
+            ShowDetails();
+        }
+
+        _settings.ModeShortcut = hotkey.IsEmpty ? "" : hotkey.ToString();
+        SaveSettings();
+        RegisterHotkeys();
+        ShowModeShortcut();
+        Log(hotkey.IsEmpty
+            ? "Removed the shortcut for switching between minimize and close."
+            : $"{hotkey} now switches between minimizing and closing apps, from anywhere (while FastFlow is open or in the tray).");
+    }
+
+    /// <summary>Switches between minimizing and closing the apps a workflow doesn't use (the mode shortcut).</summary>
+    private void ToggleMinimizeMode()
+    {
+        // Both modes only apply while other apps are cleared away at all, so the shortcut turns that on too.
+        var enabledClosing = !_closeOthers.Checked;
+        _closeOthers.Checked = true;
+        _minimize.Checked = !_minimize.Checked;
+
+        var (title, message) = _minimize.Checked
+            ? ("Minimize mode", "Apps a workflow doesn't use are minimized")
+            : ("Close mode", "Apps a workflow doesn't use are closed");
+        _ = ToastWindow.ShowAsync(title, message);
+        Log($"{title}: {message.ToLowerInvariant()}{(enabledClosing ? " (turned on Close all open apps)" : "")}.");
     }
 
     private async Task RunFromShortcutAsync(Workflow workflow)
@@ -774,6 +872,11 @@ internal sealed class MainForm : Form
                 menu.Items.Add(item);
             }
             menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(new ToolStripMenuItem("Minimize other apps instead of closing", null, (_, _) => ToggleMinimizeMode())
+            {
+                Checked = _closeOthers.Checked && _minimize.Checked,
+                ShortcutKeyDisplayString = GetModeHotkey()?.ToString(),
+            });
             menu.Items.Add(new ToolStripMenuItem("Start with Windows", null, (_, _) => _startup.Checked = !_startup.Checked)
             {
                 Checked = IsStartupEnabled(),

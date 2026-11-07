@@ -51,6 +51,8 @@ Turn on **Minimize them instead (faster switching)** under *Close all open apps*
 - remembers which window it put each of the workflow's apps in. The next time you run that workflow, it restores those same windows and puts them back in place. That includes browser windows with saved tabs, which aren't reopened. A workflow only launches an app when its window is no longer open, for example the first time you run it or after you closed the app yourself.
 - always reuses open windows, even when *Reuse windows that are already open* is unchecked.
 
+To switch between minimize mode and close mode from anywhere, click **Set mode shortcut...** below the switch and press a combination, such as `Ctrl+Alt+M`. Each press flips the mode and shows a small notification ("Minimize mode" or "Close mode"). If *Close all open apps* is off, the shortcut also turns it on, since both modes need it. Like workflow shortcuts, it works while FastFlow is open or in the tray. You can also flip the mode from the tray menu.
+
 So switching from *Work* to *Social* and back again minimizes and restores windows without relaunching anything. The windows FastFlow remembers are stored in `windows.json` next to `workflows.json`.
 
 ### Keyboard shortcuts

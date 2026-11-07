@@ -12,6 +12,9 @@ public sealed class AppSettings
     /// </summary>
     public bool MinimizeInsteadOfClose { get; set; }
 
+    /// <summary>Global shortcut that switches <see cref="MinimizeInsteadOfClose"/> on and off, e.g. "Ctrl+Alt+M" (empty = none).</summary>
+    public string ModeShortcut { get; set; } = "";
+
     /// <summary>
     /// Apps that are left running when <see cref="CloseOtherApps"/> closes everything else,
     /// by executable name (e.g. "MEmu" or "MEmu.exe"; case-insensitive).
