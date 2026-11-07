@@ -7,7 +7,7 @@ Save your Windows workspace — every open app, its window size/position, and th
 1. **Capture** – Open and arrange your apps across your virtual desktops, then click **Capture new workflow** and give it a name.
    FastFlow records, for every app window on every desktop:
    - the executable (and its command-line arguments, or the AppUserModelID for Store/MSIX apps, or the folder for File Explorer windows),
-   - for Windows Terminal windows started by a `.cmd`, `.bat`, or PowerShell script, the hosted shell command so the same script starts again instead of an empty terminal,
+   - for terminal windows running a `.cmd`, `.bat` or `.ps1` script (for example one you double-clicked, even if the window is minimized), the script, so the same script starts again in a new terminal window instead of an empty shell – one tab per script,
    - for browser windows (Chrome, Edge, Brave, Vivaldi, Opera, Firefox, ...), the URLs of the open tabs,
    - the virtual desktop number,
    - the window's position, size and state (normal / maximized / minimized). The position is where the window actually is on screen, so snapped layouts (Win+Arrow keys, Snap Layouts, side-by-side windows) and windows on other monitors are restored exactly as arranged.
@@ -102,7 +102,7 @@ On other builds the status line shows *read-only*: capture still works and apps 
 
 - **Single-instance apps** (e.g. some chat or music apps) don't open a second window when launched again. Keep *Reuse windows that are already open* checked so the existing window is moved instead.
 - **What's inside an app is not restored**, apart from browser tabs – e.g. open documents are up to the app itself (most editors restore their own session). For apps that take a file/folder argument, you can edit *Arguments* in the grid.
-- A terminal script can be restored when its shell process still contains the script in its launch command (for example, a `.cmd` file opened directly). A script typed later into an already-open interactive shell cannot be recovered reliably from Windows process metadata.
+- A terminal script is restored when its shell was started with the script (for example a `.cmd` file opened by double-clicking it). A script typed later into an already-open interactive shell is not captured; that terminal reopens as an empty shell. Restored scripts run in their own folder, like a double-click.
 - **Elevated (Run as administrator) apps** can't be moved or resized by a non-elevated FastFlow because of Windows security (UIPI). Run FastFlow as administrator if you need that.
 - **Store (UWP) apps that are suspended** while capturing may be skipped, because Windows hides which app owns the window.
 - Window coordinates are physical pixels; if you change your monitor setup or scaling, re-capture the workflow (**Re-capture (update)**).

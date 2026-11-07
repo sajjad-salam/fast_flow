@@ -22,6 +22,7 @@ internal sealed class WorkflowCapturer
         };
 
         var explorerFolders = ExplorerFolders.GetOpenFolders();
+        var hostedScripts = TerminalCommands.FindHostedScripts();
 
         // EnumWindows returns windows top-most first. Reverse so that launching in list order
         // leaves the originally top-most window on top again.
@@ -47,7 +48,7 @@ internal sealed class WorkflowCapturer
             var tabs = BrowserTabs.IsBrowser(window.ProcessName) && string.IsNullOrEmpty(window.AppUserModelId)
                 ? BrowserTabs.Capture(window.Handle)
                 : new List<string>();
-            var (launchExecutablePath, arguments) = GetLaunchCommand(window, explorerFolders);
+            var (launchExecutablePath, arguments, scripts) = GetLaunchCommand(window, explorerFolders, hostedScripts);
             if (tabs.Count > 0)
                 arguments = BrowserTabs.KeepSwitches(arguments);
 
@@ -57,6 +58,7 @@ internal sealed class WorkflowCapturer
                 Title = window.Title,
                 ExecutablePath = window.ExecutablePath,
                 LaunchExecutablePath = launchExecutablePath,
+                TerminalScripts = scripts,
                 AppUserModelId = window.AppUserModelId,
                 WindowClass = window.ClassName,
                 Arguments = arguments,
@@ -89,20 +91,26 @@ internal sealed class WorkflowCapturer
         return WindowGeometry.ToScreen(placement.rcNormalPosition);
     }
 
-    private static (string LaunchExecutablePath, string Arguments) GetLaunchCommand(
-        WindowInfo window, Dictionary<IntPtr, string> explorerFolders)
+    private static (string LaunchExecutablePath, string Arguments, List<string> TerminalScripts) GetLaunchCommand(
+        WindowInfo window, Dictionary<IntPtr, string> explorerFolders, Dictionary<IntPtr, List<HostedScript>> hostedScripts)
     {
         if (window.ClassName == "CabinetWClass")
-            return ("", explorerFolders.TryGetValue(window.Handle, out var folder) ? $"\"{folder}\"" : "");
+            return ("", explorerFolders.TryGetValue(window.Handle, out var folder) ? $"\"{folder}\"" : "", new());
 
-        if (TerminalCommands.TryGetHostedCommand(window, out var terminalCommand))
-            return (terminalCommand.ExecutablePath, terminalCommand.Arguments);
+        // A terminal running a script: start the same script(s) again rather than an empty shell.
+        if (hostedScripts.TryGetValue(window.Handle, out var scripts) && scripts.Count > 0)
+        {
+            var paths = scripts.Select(s => s.ScriptPath).ToList();
+            if (TerminalCommands.IsWindowsTerminal(window.ProcessName))
+                return (TerminalCommands.WindowsTerminalLauncher, TerminalCommands.BuildWindowsTerminalArguments(scripts), paths);
+            return (scripts[0].ShellPath, scripts[0].ShellArguments, paths);
+        }
 
         // Packaged apps are launched through their AppUserModelID, which takes no arguments.
         if (!string.IsNullOrEmpty(window.AppUserModelId))
-            return ("", "");
+            return ("", "", new());
 
         var commandLine = WindowEnumerator.GetCommandLine(window.ProcessId);
-        return ("", commandLine == null ? "" : WindowEnumerator.StripExecutable(commandLine));
+        return ("", commandLine == null ? "" : WindowEnumerator.StripExecutable(commandLine), new());
     }
 }

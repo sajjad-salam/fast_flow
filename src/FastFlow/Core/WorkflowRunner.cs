@@ -48,10 +48,16 @@ internal sealed class WorkflowRunner
         var reused = new Dictionary<WindowEntry, IntPtr>();
         if (reuseOpenWindows)
         {
+            // Terminal windows are only reused when they still run the same scripts.
+            var hostedScripts = entries.Any(e => e.TerminalScripts.Count > 0 || TerminalCommands.IsWindowsTerminal(e.ProcessName))
+                ? TerminalCommands.FindHostedScripts()
+                : new Dictionary<IntPtr, List<HostedScript>>();
+
             // A browser window with saved tabs is always opened fresh, so that its tabs are restored.
-            foreach (var entry in entries.Where(e => e.Tabs.Count == 0))
+            // Terminals running a script pick first, so that a plain terminal entry cannot take their window.
+            foreach (var entry in entries.Where(e => e.Tabs.Count == 0).OrderBy(e => e.TerminalScripts.Count == 0))
             {
-                if (FindOpenWindow(entry, claimed) is { } hwnd)
+                if (FindOpenWindow(entry, claimed, hostedScripts) is { } hwnd)
                 {
                     claimed.Add(hwnd);
                     reused[entry] = hwnd;
@@ -169,16 +175,28 @@ internal sealed class WorkflowRunner
     private static string AppKey(WindowEntry entry) =>
         entry.IsPackaged ? entry.AppUserModelId : entry.ExecutablePath;
 
-    private static IntPtr? FindOpenWindow(WindowEntry entry, HashSet<IntPtr> claimed)
+    private static IntPtr? FindOpenWindow(
+        WindowEntry entry, HashSet<IntPtr> claimed, Dictionary<IntPtr, List<HostedScript>> hostedScripts)
     {
         var candidates = WindowEnumerator.GetAppWindows()
-            .Where(w => !claimed.Contains(w.Handle) && Matches(entry, w))
+            .Where(w => !claimed.Contains(w.Handle) && Matches(entry, w) && RunsSameScripts(entry, w, hostedScripts))
             .ToList();
 
         var best = candidates.FirstOrDefault(w => w.Title == entry.Title)
                    ?? candidates.FirstOrDefault(w => w.ClassName == entry.WindowClass)
                    ?? candidates.FirstOrDefault();
         return best?.Handle;
+    }
+
+    /// <summary>A terminal entry only matches a window running the scripts it saved (or none, for a plain shell).</summary>
+    private static bool RunsSameScripts(WindowEntry entry, WindowInfo window, Dictionary<IntPtr, List<HostedScript>> hostedScripts)
+    {
+        var running = hostedScripts.TryGetValue(window.Handle, out var scripts)
+            ? scripts.Select(s => s.ScriptPath).ToList()
+            : new List<string>();
+        if (entry.TerminalScripts.Count == 0)
+            return running.Count == 0;
+        return entry.TerminalScripts.All(path => running.Contains(path, StringComparer.OrdinalIgnoreCase));
     }
 
     private bool Launch(WindowEntry entry)
@@ -199,16 +217,22 @@ internal sealed class WorkflowRunner
                 var arguments = entry.Tabs.Count > 0
                     ? BrowserTabs.BuildArguments(entry.ProcessName, entry.Arguments, entry.Tabs)
                     : entry.Arguments;
+                // A script runs in its own folder, as when it is double-clicked.
+                var workingDirectory = entry.TerminalScripts.Count > 0
+                    ? Path.GetDirectoryName(entry.TerminalScripts[0])
+                    : Path.GetDirectoryName(executablePath);
                 psi = new ProcessStartInfo(executablePath, arguments)
                 {
-                    WorkingDirectory = Path.GetDirectoryName(executablePath) ?? "",
+                    WorkingDirectory = workingDirectory ?? "",
                 };
             }
             psi.UseShellExecute = true;
 
             _log(entry.Tabs.Count > 0
                 ? $"  {entry.ProcessName}: launching with {entry.Tabs.Count} tab(s)..."
-                : $"  {entry.ProcessName}: launching...");
+                : entry.TerminalScripts.Count > 0
+                    ? $"  {entry.ProcessName}: launching {string.Join(", ", entry.TerminalScripts.Select(Path.GetFileName))}..."
+                    : $"  {entry.ProcessName}: launching...");
             Process.Start(psi)?.Dispose();
             return true;
         }
