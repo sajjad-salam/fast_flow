@@ -186,19 +186,22 @@ internal sealed class WorkflowRunner
         try
         {
             ProcessStartInfo psi;
-            if (entry.IsPackaged)
+            if (entry.IsPackaged && string.IsNullOrEmpty(entry.LaunchExecutablePath))
             {
                 // Store / MSIX apps cannot be started from their exe; go through the shell instead.
                 psi = new ProcessStartInfo("explorer.exe", $"shell:AppsFolder\\{entry.AppUserModelId}");
             }
             else
             {
+                var executablePath = string.IsNullOrEmpty(entry.LaunchExecutablePath)
+                    ? entry.ExecutablePath
+                    : entry.LaunchExecutablePath;
                 var arguments = entry.Tabs.Count > 0
                     ? BrowserTabs.BuildArguments(entry.ProcessName, entry.Arguments, entry.Tabs)
                     : entry.Arguments;
-                psi = new ProcessStartInfo(entry.ExecutablePath, arguments)
+                psi = new ProcessStartInfo(executablePath, arguments)
                 {
-                    WorkingDirectory = Path.GetDirectoryName(entry.ExecutablePath) ?? "",
+                    WorkingDirectory = Path.GetDirectoryName(executablePath) ?? "",
                 };
             }
             psi.UseShellExecute = true;

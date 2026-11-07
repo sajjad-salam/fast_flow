@@ -47,7 +47,7 @@ internal sealed class WorkflowCapturer
             var tabs = BrowserTabs.IsBrowser(window.ProcessName) && string.IsNullOrEmpty(window.AppUserModelId)
                 ? BrowserTabs.Capture(window.Handle)
                 : new List<string>();
-            var arguments = GetArguments(window, explorerFolders);
+            var (launchExecutablePath, arguments) = GetLaunchCommand(window, explorerFolders);
             if (tabs.Count > 0)
                 arguments = BrowserTabs.KeepSwitches(arguments);
 
@@ -56,6 +56,7 @@ internal sealed class WorkflowCapturer
                 ProcessName = window.ProcessName,
                 Title = window.Title,
                 ExecutablePath = window.ExecutablePath,
+                LaunchExecutablePath = launchExecutablePath,
                 AppUserModelId = window.AppUserModelId,
                 WindowClass = window.ClassName,
                 Arguments = arguments,
@@ -88,16 +89,20 @@ internal sealed class WorkflowCapturer
         return WindowGeometry.ToScreen(placement.rcNormalPosition);
     }
 
-    private static string GetArguments(WindowInfo window, Dictionary<IntPtr, string> explorerFolders)
+    private static (string LaunchExecutablePath, string Arguments) GetLaunchCommand(
+        WindowInfo window, Dictionary<IntPtr, string> explorerFolders)
     {
         if (window.ClassName == "CabinetWClass")
-            return explorerFolders.TryGetValue(window.Handle, out var folder) ? $"\"{folder}\"" : "";
+            return ("", explorerFolders.TryGetValue(window.Handle, out var folder) ? $"\"{folder}\"" : "");
+
+        if (TerminalCommands.TryGetHostedCommand(window, out var terminalCommand))
+            return (terminalCommand.ExecutablePath, terminalCommand.Arguments);
 
         // Packaged apps are launched through their AppUserModelID, which takes no arguments.
         if (!string.IsNullOrEmpty(window.AppUserModelId))
-            return "";
+            return ("", "");
 
         var commandLine = WindowEnumerator.GetCommandLine(window.ProcessId);
-        return commandLine == null ? "" : WindowEnumerator.StripExecutable(commandLine);
+        return ("", commandLine == null ? "" : WindowEnumerator.StripExecutable(commandLine));
     }
 }

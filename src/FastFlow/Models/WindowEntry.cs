@@ -15,6 +15,13 @@ public sealed class WindowEntry
     /// <summary>Full path of the executable to start.</summary>
     public string ExecutablePath { get; set; } = "";
 
+    /// <summary>
+    /// Optional executable to launch instead of the process that owns the window. This is used for
+    /// hosted terminals: WindowsTerminal.exe owns the window, but cmd.exe owns the saved batch command.
+    /// </summary>
+    [Browsable(false)]
+    public string LaunchExecutablePath { get; set; } = "";
+
     /// <summary>Command-line arguments used when launching (editable).</summary>
     public string Arguments { get; set; } = "";
 

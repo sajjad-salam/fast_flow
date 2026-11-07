@@ -16,6 +16,14 @@ internal sealed record WindowInfo(
     public string ProcessName => Path.GetFileNameWithoutExtension(ExecutablePath);
 }
 
+/// <summary>A process below a window-owning process, used to find the command hosted by a terminal.</summary>
+internal sealed record DescendantProcess(
+    uint ProcessId,
+    uint ParentProcessId,
+    int Depth,
+    string ExecutablePath,
+    string CommandLine);
+
 /// <summary>Finds the "real" application windows – the ones that show up in Alt+Tab / Task View – on all desktops.</summary>
 internal static class WindowEnumerator
 {
@@ -202,5 +210,56 @@ internal static class WindowEnumerator
         }
         var space = s.IndexOf(' ');
         return space < 0 ? "" : s[(space + 1)..].Trim();
+    }
+
+    /// <summary>
+    /// Returns processes descended from <paramref name="rootPid"/>. Windows Terminal owns the visible
+    /// window, while the command shell that carries the useful launch command is one of its children.
+    /// </summary>
+    public static List<DescendantProcess> GetDescendantProcesses(uint rootPid)
+    {
+        var snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot == INVALID_HANDLE_VALUE)
+            return new List<DescendantProcess>();
+
+        try
+        {
+            var processes = new List<(uint Pid, uint ParentPid)>();
+            var entry = PROCESSENTRY32.Create();
+            if (Process32First(snapshot, ref entry))
+            {
+                do
+                {
+                    processes.Add((entry.th32ProcessID, entry.th32ParentProcessID));
+                    entry.dwSize = (uint)Marshal.SizeOf<PROCESSENTRY32>();
+                } while (Process32Next(snapshot, ref entry));
+            }
+
+            var result = new List<DescendantProcess>();
+            var frontier = new HashSet<uint> { rootPid };
+            var seen = new HashSet<uint> { rootPid };
+            var depth = 0;
+            while (frontier.Count > 0)
+            {
+                depth++;
+                var children = processes
+                    .Where(p => frontier.Contains(p.ParentPid) && seen.Add(p.Pid))
+                    .ToList();
+                frontier = children.Select(p => p.Pid).ToHashSet();
+
+                foreach (var child in children)
+                {
+                    var path = GetProcessPath(child.Pid);
+                    var commandLine = GetCommandLine(child.Pid);
+                    if (!string.IsNullOrEmpty(path) && !string.IsNullOrEmpty(commandLine))
+                        result.Add(new DescendantProcess(child.Pid, child.ParentPid, depth, path, commandLine));
+                }
+            }
+            return result;
+        }
+        finally
+        {
+            CloseHandle(snapshot);
+        }
     }
 }
