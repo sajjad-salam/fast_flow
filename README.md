@@ -43,6 +43,16 @@ When *Reuse windows that are already open* is checked (the default), a window of
 
 Uncheck *Close all open apps* to keep the old behaviour of adding the workflow's apps to what is already open.
 
+#### Minimize instead of closing
+
+Turn on **Minimize them instead (faster switching)** under *Close all open apps* to switch workflows without quitting anything. When this is on, FastFlow:
+
+- minimizes every app window the workflow doesn't use, on every desktop, instead of closing it. The apps keep running and you don't get "Save changes?" prompts or wait for them to shut down. *Apps to keep open* are left as they are.
+- remembers which window it put each of the workflow's apps in. The next time you run that workflow, it restores those same windows and puts them back in place. That includes browser windows with saved tabs, which aren't reopened. A workflow only launches an app when its window is no longer open, for example the first time you run it or after you closed the app yourself.
+- always reuses open windows, even when *Reuse windows that are already open* is unchecked.
+
+So switching from *Work* to *Social* and back again minimizes and restores windows without relaunching anything. The windows FastFlow remembers are stored in `windows.json` next to `workflows.json`.
+
 ### Keyboard shortcuts
 
 Select a workflow and click **Set shortcut...**, then press the combination you want – Ctrl, Alt, Shift and/or Win plus one key, e.g. `Ctrl+Alt+1` or `Ctrl+Alt+Shift+F5` (F1–F24 also work on their own). The shortcut is shown next to the workflow name and works from any app, on any desktop.

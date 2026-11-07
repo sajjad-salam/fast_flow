@@ -43,6 +43,10 @@ internal sealed class MainForm : Form
         BorderStyle = BorderStyle.None, BackColor = Theme.Card, ForeColor = Color.FromArgb(90, 90, 90), Font = Theme.Mono,
     };
     private readonly ToggleSwitch _closeOthers = new() { Text = "Close all open apps before running" };
+    private readonly ToggleSwitch _minimize = new()
+    {
+        Text = "Minimize them instead (faster switching)", Margin = new Padding(47, 0, 0, 4),
+    };
     private readonly ToggleSwitch _reuse = new() { Text = "Reuse windows that are already open" };
     private readonly ToggleSwitch _startup = new() { Text = "Start with Windows" };
     private readonly ToolTip _tips = new();
@@ -161,13 +165,19 @@ internal sealed class MainForm : Form
         listCard.Controls.Add(listHeader);
 
         _closeOthers.Checked = _settings.CloseOtherApps;
+        _minimize.Checked = _settings.MinimizeInsteadOfClose;
         _reuse.Checked = _settings.ReuseOpenWindows;
         RefreshStartupEntry();
         _startup.Checked = IsStartupEnabled();
         _closeOthers.CheckedChanged += (_, _) => { _settings.CloseOtherApps = _closeOthers.Checked; SaveSettings(); };
+        _minimize.CheckedChanged += (_, _) => { _settings.MinimizeInsteadOfClose = _minimize.Checked; SaveSettings(); };
         _reuse.CheckedChanged += (_, _) => { _settings.ReuseOpenWindows = _reuse.Checked; SaveSettings(); };
         _startup.CheckedChanged += (_, _) => SetStartup(_startup.Checked);
+        _minimize.Enabled = _closeOthers.Checked;
+        _closeOthers.CheckedChanged += (_, _) => _minimize.Enabled = _closeOthers.Checked;
         _tips.SetToolTip(_closeOthers, "Closes the apps on every virtual desktop first, so the workflow starts from a clean slate.");
+        _tips.SetToolTip(_minimize, "Minimizes the apps the workflow doesn't use instead of closing them. Switching back to a "
+                                    + "workflow then restores its windows (browser tabs included) instead of relaunching them.");
         _tips.SetToolTip(_reuse, "Keeps a window of an app the workflow also uses and moves it into place instead of relaunching it.");
         _tips.SetToolTip(_startup, "Starts FastFlow hidden in the tray at sign-in, so workflow shortcuts always work.");
 
@@ -189,6 +199,7 @@ internal sealed class MainForm : Form
         var options = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         options.Controls.Add(new Label { Text = "Options", AutoSize = true, Font = Theme.Heading, Margin = new Padding(0, 0, 0, 8) });
         options.Controls.Add(_closeOthers);
+        options.Controls.Add(_minimize);
         options.Controls.Add(keepOpen);
         options.Controls.Add(_reuse);
         options.Controls.Add(_startup);
@@ -575,7 +586,7 @@ internal sealed class MainForm : Form
         try
         {
             var (restored, total) = await new WorkflowRunner(_desktops, Log)
-                .RunAsync(workflow, _reuse.Checked, _closeOthers.Checked, _settings.KeepOpenApps);
+                .RunAsync(workflow, _reuse.Checked, _closeOthers.Checked, _minimize.Checked, _settings.KeepOpenApps);
             if (total > 0)
                 _toast = ToastWindow.ShowAsync($"“{workflow.Name}” is ready", restored == total
                     ? total == 1 ? "FastFlow finished opening the window" : $"FastFlow finished opening all {total} windows"

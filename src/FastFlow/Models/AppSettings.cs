@@ -7,6 +7,12 @@ public sealed class AppSettings
     public bool CloseOtherApps { get; set; } = true;
 
     /// <summary>
+    /// With <see cref="CloseOtherApps"/>: minimize the other apps instead of closing them, and bring back the
+    /// windows a workflow used last time, so switching between workflows doesn't relaunch anything.
+    /// </summary>
+    public bool MinimizeInsteadOfClose { get; set; }
+
+    /// <summary>
     /// Apps that are left running when <see cref="CloseOtherApps"/> closes everything else,
     /// by executable name (e.g. "MEmu" or "MEmu.exe"; case-insensitive).
     /// </summary>

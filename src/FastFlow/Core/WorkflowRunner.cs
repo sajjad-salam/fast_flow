@@ -34,11 +34,18 @@ internal sealed class WorkflowRunner
     /// also spared by <paramref name="closeOtherApps"/> and just moved and resized into place.
     /// </param>
     /// <param name="closeOtherApps">First close every open app window on every virtual desktop.</param>
+    /// <param name="minimizeInsteadOfClose">
+    /// With <paramref name="closeOtherApps"/>: minimize those windows instead of closing them, and bring back the
+    /// windows this workflow used last time (browser windows with tabs too) instead of launching new ones.
+    /// Implies <paramref name="reuseOpenWindows"/>.
+    /// </param>
     /// <param name="keepOpenApps">Executable names of apps that <paramref name="closeOtherApps"/> leaves running.</param>
     /// <returns>How many of the workflow's enabled windows were restored.</returns>
     public async Task<(int Restored, int Total)> RunAsync(Workflow workflow, bool reuseOpenWindows, bool closeOtherApps,
-        IEnumerable<string> keepOpenApps, CancellationToken token = default)
+        bool minimizeInsteadOfClose, IEnumerable<string> keepOpenApps, CancellationToken token = default)
     {
+        var minimize = closeOtherApps && minimizeInsteadOfClose;
+        reuseOpenWindows |= minimize;
         var entries = workflow.Windows.Where(w => w.Enabled).ToList();
         _log($"Running \"{workflow.Name}\" ({entries.Count} windows)...");
 
@@ -46,16 +53,36 @@ internal sealed class WorkflowRunner
         // that share an app (e.g. Obsidian) moves its window instead of closing and relaunching it.
         var claimed = new HashSet<IntPtr>();
         var reused = new Dictionary<WindowEntry, IntPtr>();
+        var memory = WindowMemory.Load();
+        if (minimize)
+        {
+            // Other workflows' windows are minimized, not closed, so the windows this workflow was placed in
+            // last time may still be open: take those first, browser windows with tabs included, since they
+            // still show the workflow's tabs.
+            var open = WindowEnumerator.GetAppWindows().ToDictionary(w => w.Handle);
+            foreach (var entry in entries)
+            {
+                if (memory.Find(workflow, entry) is { } hwnd && !claimed.Contains(hwnd)
+                    && open.TryGetValue(hwnd, out var window) && Matches(entry, window))
+                {
+                    claimed.Add(hwnd);
+                    reused[entry] = hwnd;
+                }
+            }
+        }
+
         if (reuseOpenWindows)
         {
             // Terminal windows are only reused when they still run the same scripts.
-            var hostedScripts = entries.Any(e => e.TerminalScripts.Count > 0 || TerminalCommands.IsWindowsTerminal(e.ProcessName))
+            var hostedScripts = entries.Any(e => !reused.ContainsKey(e)
+                                                 && (e.TerminalScripts.Count > 0 || TerminalCommands.IsWindowsTerminal(e.ProcessName)))
                 ? TerminalCommands.FindHostedScripts()
                 : new Dictionary<IntPtr, List<HostedScript>>();
 
-            // A browser window with saved tabs is always opened fresh, so that its tabs are restored.
+            // A browser window with saved tabs is otherwise opened fresh, so that its tabs are restored.
             // Terminals running a script pick first, so that a plain terminal entry cannot take their window.
-            foreach (var entry in entries.Where(e => e.Tabs.Count == 0).OrderBy(e => e.TerminalScripts.Count == 0))
+            foreach (var entry in entries.Where(e => e.Tabs.Count == 0 && !reused.ContainsKey(e))
+                         .OrderBy(e => e.TerminalScripts.Count == 0))
             {
                 if (FindOpenWindow(entry, claimed, hostedScripts) is { } hwnd)
                 {
@@ -65,7 +92,9 @@ internal sealed class WorkflowRunner
             }
         }
 
-        if (closeOtherApps)
+        if (minimize)
+            AppMinimizer.MinimizeAll(keepOpenApps, claimed, _log);
+        else if (closeOtherApps)
             await AppCloser.CloseAllAsync(keepOpenApps, claimed, _log, token);
 
         if (entries.Count == 0)
@@ -125,6 +154,7 @@ internal sealed class WorkflowRunner
         // (two browser windows, two folders, ...) still go one at a time, so that each new window is
         // matched to the right entry.
         await Task.WhenAll(entries.GroupBy(AppKey, StringComparer.OrdinalIgnoreCase).Select(RestoreAsync));
+        memory.Save(workflow, placed);
 
         // Take the user to the desktop chosen for this workflow, or – by default – to the desktop of a
         // layout that lives on a single desktop, wherever they started the run from.
