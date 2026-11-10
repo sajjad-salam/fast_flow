@@ -28,6 +28,10 @@ internal sealed class MainForm : Form
     private const int ModeHotkeyId = 0xB000;
     private bool _modeHotkeyRegistered;
 
+    /// <summary>RegisterHotKey id of the quick switcher shortcut.</summary>
+    private const int SwitcherHotkeyId = 0xB001;
+    private bool _switcherHotkeyRegistered;
+
     private readonly ListBox _list = new()
     {
         Dock = DockStyle.Fill, IntegralHeight = false, BorderStyle = BorderStyle.None,
@@ -52,6 +56,7 @@ internal sealed class MainForm : Form
         Text = "Minimize them instead (faster switching)", Margin = new Padding(47, 0, 0, 4),
     };
     private readonly PillButton _modeShortcut = new() { Radius = 12, Margin = new Padding(47, 0, 0, 6), Font = Theme.SmallMedium };
+    private readonly PillButton _switcherShortcut = new();
     private readonly ToggleSwitch _reuse = new() { Text = "Reuse windows that are already open" };
     private readonly ToggleSwitch _startup = new() { Text = "Start with Windows" };
     private readonly ToolTip _tips = new();
@@ -75,6 +80,14 @@ internal sealed class MainForm : Form
     private readonly Dictionary<PillButton, bool> _commands = new();
 
     private bool _running;
+
+    /// <summary>Cancels the previous run's background correction pass, so it can't move windows the next run placed.</summary>
+    private CancellationTokenSource? _settle;
+    private Task _settled = Task.CompletedTask;
+
+    /// <summary>Workflows in the order they last ran (most recent first), for the quick switcher.</summary>
+    private readonly List<Guid> _recent = new();
+
     private bool _exiting;
     private bool _startHidden;
     private bool _trayHintShown;
@@ -150,7 +163,18 @@ internal sealed class MainForm : Form
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         header.Controls.Add(brand, 0, 0);
-        header.Controls.Add(capture, 1, 0);
+        ShowSwitcherShortcut();
+        _switcherShortcut.Margin = new Padding(0, 0, 10, 0);
+        _switcherShortcut.Click += (_, _) => SetSwitcherShortcut();
+        _tips.SetToolTip(_switcherShortcut, "Press this shortcut anywhere, type a few letters of a workflow and press Enter. "
+                                            + "Shortcut then Enter goes back to the workflow you ran before. Click to change it.");
+        var headerActions = new FlowLayoutPanel
+        {
+            AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = Padding.Empty,
+        };
+        headerActions.Controls.Add(_switcherShortcut);
+        headerActions.Controls.Add(capture);
+        header.Controls.Add(headerActions, 1, 0);
         var hero = new TwoToneLabel
         {
             Font = Theme.Hero, ForeColor = Theme.Ink, Margin = new Padding(0, 16, 0, 0),
@@ -461,6 +485,11 @@ internal sealed class MainForm : Form
             ToggleMinimizeMode();
             return;
         }
+        if (m.Msg == WM_HOTKEY && m.WParam.ToInt32() == SwitcherHotkeyId)
+        {
+            OpenSwitcher();
+            return;
+        }
         if (m.Msg == WM_HOTKEY && _hotkeys.TryGetValue(m.WParam.ToInt32(), out var workflow))
         {
             _ = RunFromShortcutAsync(workflow);
@@ -597,10 +626,17 @@ internal sealed class MainForm : Form
             return;
         _running = true;
         UpdateCommands();
+        _settle?.Cancel();
+        _settle?.Dispose();
+        _settle = new CancellationTokenSource();
+        _recent.Remove(workflow.Id);
+        _recent.Insert(0, workflow.Id);
         try
         {
-            var (restored, total) = await new WorkflowRunner(_desktops, Log)
-                .RunAsync(workflow, _reuse.Checked, _closeOthers.Checked, _minimize.Checked, _settings.KeepOpenApps);
+            var (restored, total, settled) = await new WorkflowRunner(_desktops, Log)
+                .RunAsync(workflow, _reuse.Checked, _closeOthers.Checked, _minimize.Checked, _settings.KeepOpenApps,
+                    settleToken: _settle.Token);
+            _settled = settled;
             if (total > 0)
                 _toast = ToastWindow.ShowAsync($"“{workflow.Name}” is ready", restored == total
                     ? total == 1 ? "FastFlow finished opening the window" : $"FastFlow finished opening all {total} windows"
@@ -632,7 +668,8 @@ internal sealed class MainForm : Form
 
         WindowState = FormWindowState.Minimized;
         await RunAsync(workflow);
-        await _toast;
+        // This process exits afterwards, so let the launched apps settle before it does.
+        await Task.WhenAll(_toast, _settled);
         Close();
     }
 
@@ -681,30 +718,8 @@ internal sealed class MainForm : Form
         if (result is not { } hotkey)
             return;
 
-        if (!hotkey.IsEmpty)
-        {
-            if (GetModeHotkey() == hotkey)
-            {
-                if (MessageBox.Show(this, $"{hotkey} is already the shortcut that switches between minimizing and closing apps. "
-                                          + $"Move it to \"{wf.Name}\"?",
-                        "FastFlow", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
-                    return;
-                _settings.ModeShortcut = "";
-                SaveSettings();
-                ShowModeShortcut();
-            }
-
-            var other = _workflows.FirstOrDefault(w => w != wf && w.GetHotkey() == hotkey);
-            if (other != null
-                && MessageBox.Show(this, $"{hotkey} is already the shortcut of \"{other.Name}\". Move it to \"{wf.Name}\"?",
-                    "FastFlow", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
-                return;
-            if (other != null)
-            {
-                other.Shortcut = "";
-                _workflows.ResetItem(_workflows.IndexOf(other));
-            }
-        }
+        if (!ClaimShortcut(hotkey, wf.Id.ToString(), $"\"{wf.Name}\""))
+            return;
 
         wf.Shortcut = hotkey.IsEmpty ? "" : hotkey.ToString();
         _workflows.ResetItem(_workflows.IndexOf(wf));
@@ -762,6 +777,13 @@ internal sealed class MainForm : Form
             if (!_modeHotkeyRegistered)
                 Log($"Shortcut {modeHotkey} for switching between minimize and close could not be registered – another app or Windows already uses it. Pick a different one.");
         }
+
+        if (GetSwitcherHotkey() is { } switcherHotkey)
+        {
+            _switcherHotkeyRegistered = RegisterHotKey(Handle, SwitcherHotkeyId, ToNativeModifiers(switcherHotkey), (uint)switcherHotkey.Key);
+            if (!_switcherHotkeyRegistered)
+                Log($"Quick switcher shortcut {switcherHotkey} could not be registered – another app or Windows already uses it. Click it at the top to pick a different one.");
+        }
     }
 
     private static uint ToNativeModifiers(Hotkey hotkey)
@@ -782,6 +804,9 @@ internal sealed class MainForm : Form
         if (_modeHotkeyRegistered)
             UnregisterHotKey(Handle, ModeHotkeyId);
         _modeHotkeyRegistered = false;
+        if (_switcherHotkeyRegistered)
+            UnregisterHotKey(Handle, SwitcherHotkeyId);
+        _switcherHotkeyRegistered = false;
     }
 
     private Hotkey? GetModeHotkey() => Hotkey.TryParse(_settings.ModeShortcut, out var hotkey) ? hotkey : null;
@@ -808,16 +833,8 @@ internal sealed class MainForm : Form
         if (result is not { } hotkey)
             return;
 
-        if (!hotkey.IsEmpty && _workflows.FirstOrDefault(w => w.GetHotkey() == hotkey) is { } other)
-        {
-            if (MessageBox.Show(this, $"{hotkey} is already the shortcut of \"{other.Name}\". Use it to switch modes instead?",
-                    "FastFlow", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
-                return;
-            other.Shortcut = "";
-            _workflows.ResetItem(_workflows.IndexOf(other));
-            SaveAll();
-            ShowDetails();
-        }
+        if (!ClaimShortcut(hotkey, ModeOwner, "switching modes"))
+            return;
 
         _settings.ModeShortcut = hotkey.IsEmpty ? "" : hotkey.ToString();
         SaveSettings();
@@ -826,6 +843,137 @@ internal sealed class MainForm : Form
         Log(hotkey.IsEmpty
             ? "Removed the shortcut for switching between minimize and close."
             : $"{hotkey} now switches between minimizing and closing apps, from anywhere (while FastFlow is open or in the tray).");
+    }
+
+    private const string ModeOwner = "mode";
+    private const string SwitcherOwner = "switcher";
+
+    /// <summary>
+    /// Makes <paramref name="hotkey"/> free for a new use, asking first if a workflow, the mode shortcut or the quick
+    /// switcher already has it. <paramref name="owner"/> identifies the new use (a workflow id, <see cref="ModeOwner"/>
+    /// or <see cref="SwitcherOwner"/>), so a shortcut that is simply kept doesn't ask.
+    /// </summary>
+    /// <returns>False when the user chose to keep the shortcut where it is.</returns>
+    private bool ClaimShortcut(Hotkey hotkey, string owner, string newUse)
+    {
+        if (hotkey.IsEmpty)
+            return true;
+
+        var uses = new List<(string Owner, string Description, Hotkey? Key, Action Clear)>
+        {
+            (ModeOwner, "the shortcut that switches between minimizing and closing apps", GetModeHotkey(), () =>
+            {
+                _settings.ModeShortcut = "";
+                SaveSettings();
+                ShowModeShortcut();
+            }),
+            (SwitcherOwner, "the quick switcher shortcut", GetSwitcherHotkey(), () =>
+            {
+                _settings.SwitcherShortcut = "";
+                SaveSettings();
+                ShowSwitcherShortcut();
+            }),
+        };
+        foreach (var workflow in _workflows)
+        {
+            uses.Add((workflow.Id.ToString(), $"the shortcut of \"{workflow.Name}\"", workflow.GetHotkey(), () =>
+            {
+                workflow.Shortcut = "";
+                _workflows.ResetItem(_workflows.IndexOf(workflow));
+                SaveAll();
+                ShowDetails();
+            }));
+        }
+
+        foreach (var use in uses.Where(u => u.Owner != owner && u.Key == hotkey))
+        {
+            if (MessageBox.Show(this, $"{hotkey} is already {use.Description}. Use it for {newUse} instead?",
+                    "FastFlow", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                return false;
+            use.Clear();
+        }
+        return true;
+    }
+
+    private Hotkey? GetSwitcherHotkey() => Hotkey.TryParse(_settings.SwitcherShortcut, out var hotkey) ? hotkey : null;
+
+    private void ShowSwitcherShortcut() =>
+        _switcherShortcut.Text = GetSwitcherHotkey() is { } hotkey ? $"Quick switcher  {hotkey}" : "Set quick switcher shortcut...";
+
+    private void SetSwitcherShortcut()
+    {
+        // Suspend the global shortcuts while recording, otherwise pressing one would trigger it.
+        UnregisterHotkeys();
+        Hotkey? result;
+        try
+        {
+            result = HotkeyDialog.Show(this, "Quick switcher shortcut",
+                "Press the shortcut that opens the quick switcher from anywhere\n"
+                + "(Ctrl / Alt / Shift / Win plus a key, e.g. Ctrl+Alt+Space):",
+                GetSwitcherHotkey());
+        }
+        finally
+        {
+            RegisterHotkeys();
+        }
+        if (result is not { } hotkey || !ClaimShortcut(hotkey, SwitcherOwner, "the quick switcher"))
+            return;
+
+        _settings.SwitcherShortcut = hotkey.IsEmpty ? "" : hotkey.ToString();
+        SaveSettings();
+        RegisterHotkeys();
+        ShowSwitcherShortcut();
+        Log(hotkey.IsEmpty
+            ? "Removed the quick switcher shortcut."
+            : $"{hotkey} now opens the quick switcher from anywhere (while FastFlow is open or in the tray).");
+    }
+
+    /// <summary>
+    /// Opens the quick switcher. Workflows are listed by when they last ran, except that the one running now comes
+    /// second: the shortcut followed by Enter goes back to the previous workflow, like Alt+Tab for workflows.
+    /// </summary>
+    private void OpenSwitcher()
+    {
+        var byRecent = _workflows
+            .OrderBy(w => _recent.IndexOf(w.Id) is var i && i >= 0 ? i : int.MaxValue)
+            .ToList();
+        var current = _recent.Count > 0 ? byRecent.FirstOrDefault(w => w.Id == _recent[0]) : null;
+        if (current != null && byRecent.Count > 1)
+        {
+            byRecent.Remove(current);
+            byRecent.Insert(1, current);
+        }
+
+        var items = byRecent.Select(w => new QuickSwitcher.Item(
+            w.Name,
+            Describe(w, withShortcut: false) + (w == current ? "  ·  running now" : ""),
+            w.GetHotkey()?.ToString() ?? "",
+            () => _ = RunFromShortcutAsync(w))).ToList();
+
+        var minimizing = _closeOthers.Checked && _minimize.Checked;
+        items.Add(new QuickSwitcher.Item(
+            minimizing ? "Switch to close mode" : "Switch to minimize mode",
+            minimizing ? "Close the apps a workflow doesn't use" : "Minimize the apps a workflow doesn't use instead of closing them",
+            GetModeHotkey()?.ToString() ?? "", ToggleMinimizeMode));
+        items.Add(new QuickSwitcher.Item("Capture new workflow", "Save the apps that are open now as a workflow", "",
+            () => { ShowFromTray(); _ = CaptureFromSwitcherAsync(); }));
+        items.Add(new QuickSwitcher.Item("Open FastFlow", "Show the manager window", "", ShowFromTray));
+
+        QuickSwitcher.Toggle(items);
+    }
+
+    private async Task CaptureFromSwitcherAsync()
+    {
+        if (_running)
+            return;
+        try
+        {
+            await CaptureAsync(replace: null);
+        }
+        catch (Exception ex)
+        {
+            Log($"Error: {ex.Message}");
+        }
     }
 
     /// <summary>Switches between minimizing and closing the apps a workflow doesn't use (the mode shortcut).</summary>
@@ -860,6 +1008,10 @@ internal sealed class MainForm : Form
             var open = new ToolStripMenuItem("Open FastFlow", null, (_, _) => ShowFromTray());
             open.Font = new Font(open.Font, FontStyle.Bold);
             menu.Items.Add(open);
+            menu.Items.Add(new ToolStripMenuItem("Quick switcher", null, (_, _) => OpenSwitcher())
+            {
+                ShortcutKeyDisplayString = GetSwitcherHotkey()?.ToString(),
+            });
             if (_workflows.Count > 0)
                 menu.Items.Add(new ToolStripSeparator());
             foreach (var workflow in _workflows)

@@ -17,7 +17,7 @@ Save your Windows workspace — every open app, its window size/position, and th
    - launches each app (or reuses an already-open window of it, if *Reuse windows that are already open* is checked),
    - waits for the window, sets its size/position/state, and moves it to its desktop,
    - once the apps are open, switches you to the desktop chosen with **Desktop after run...** – by default, the workflow's desktop if all of its windows are on one virtual desktop (workflows that span several desktops leave you where you are),
-   - checks again a few seconds later and puts back any window that an app moved or resized itself after starting (browsers and Electron apps often restore their own last position).
+   - for apps it had to launch, checks again a few seconds later and puts back any window that the app moved or resized itself after starting (browsers and Electron apps often restore their own last position). This happens in the background: the run is finished, and you can start the next one, as soon as every window is in place. Windows that were reused or restored are already where they belong and aren't checked again.
    - when everything is open, plays the Windows notification sound and shows a small notification that slides up from the bottom of the screen ("*Work* is ready") for a few seconds. It doesn't take focus; click it to dismiss it.
 3. **Edit** – The grid on the right shows the captured windows. You can edit arguments, tab URLs, positions or the desktop number, or uncheck *Enabled* to skip a window. Changes are saved automatically.
 
@@ -60,6 +60,12 @@ So switching from *Work* to *Social* and back again minimizes and restores windo
 Select a workflow and click **Set shortcut...**, then press the combination you want – Ctrl, Alt, Shift and/or Win plus one key, e.g. `Ctrl+Alt+1` or `Ctrl+Alt+Shift+F5` (F1–F24 also work on their own). The shortcut is shown next to the workflow name and works from any app, on any desktop.
 
 Shortcuts work while FastFlow is running, so closing the window keeps it in the notification area (tray); right-click the tray icon to run a workflow or **Exit**. Check *Start with Windows* (also in the tray menu) to start FastFlow hidden in the tray at sign-in (`FastFlow.exe --tray`), so your shortcuts are always available. If a combination is already taken by Windows or another app, the log says so – pick another one.
+
+### Quick switcher
+
+Press **`Ctrl+Alt+Space`** anywhere to open the quick switcher: type a few letters of a workflow's name and press **Enter** (or use ↑ ↓ to pick one). Workflows are listed by when they last ran, with the one running now in second place, so **`Ctrl+Alt+Space` then `Enter` goes back to the workflow you were in before** – like Alt+Tab, but for workflows. The switcher can also flip between minimize and close mode, capture a new workflow, or open the manager. Esc, a click elsewhere, or the shortcut again closes it.
+
+Click **Quick switcher** at the top of the manager to choose a different shortcut, or remove it. It is also in the tray menu.
 
 ### Desktop after run
 

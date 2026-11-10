@@ -13,11 +13,15 @@ namespace FastFlow.Core;
 /// desktop COM objects must be called from the STA thread that created them. The apps are restored in
 /// parallel, but only ever interleave at awaits on that one thread, so they share state without locks.
 /// </summary>
+/// <param name="Settled">Completes once launched apps have stopped moving their windows and been put back.</param>
+internal sealed record RunResult(int Restored, int Total, Task Settled);
+
 internal sealed class WorkflowRunner
 {
     private static readonly TimeSpan WindowTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan ClassMismatchGrace = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
+    // Listing the windows is cheap now that process details are cached, so new windows can be spotted sooner.
+    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(100);
     private static readonly TimeSpan[] CorrectionDelays = { TimeSpan.FromMilliseconds(1500), TimeSpan.FromMilliseconds(2500) };
 
     private readonly VirtualDesktopService _desktops;
@@ -40,9 +44,15 @@ internal sealed class WorkflowRunner
     /// Implies <paramref name="reuseOpenWindows"/>.
     /// </param>
     /// <param name="keepOpenApps">Executable names of apps that <paramref name="closeOtherApps"/> leaves running.</param>
-    /// <returns>How many of the workflow's enabled windows were restored.</returns>
-    public async Task<(int Restored, int Total)> RunAsync(Workflow workflow, bool reuseOpenWindows, bool closeOtherApps,
-        bool minimizeInsteadOfClose, IEnumerable<string> keepOpenApps, CancellationToken token = default)
+    /// <param name="settleToken">Cancels <see cref="RunResult.Settled"/>, e.g. because another workflow starts.</param>
+    /// <returns>
+    /// How many of the workflow's enabled windows were restored, as soon as every window is in place. Apps that were
+    /// launched may still move themselves afterwards; <see cref="RunResult.Settled"/> puts them back and completes
+    /// a few seconds later.
+    /// </returns>
+    public async Task<RunResult> RunAsync(Workflow workflow, bool reuseOpenWindows, bool closeOtherApps,
+        bool minimizeInsteadOfClose, IEnumerable<string> keepOpenApps, CancellationToken token = default,
+        CancellationToken settleToken = default)
     {
         var minimize = closeOtherApps && minimizeInsteadOfClose;
         reuseOpenWindows |= minimize;
@@ -54,12 +64,14 @@ internal sealed class WorkflowRunner
         var claimed = new HashSet<IntPtr>();
         var reused = new Dictionary<WindowEntry, IntPtr>();
         var memory = WindowMemory.Load();
+        // One look at the open windows serves all of the matching below, and the minimizing or closing.
+        var openWindows = WindowEnumerator.GetAppWindows();
         if (minimize)
         {
             // Other workflows' windows are minimized, not closed, so the windows this workflow was placed in
             // last time may still be open: take those first, browser windows with tabs included, since they
             // still show the workflow's tabs.
-            var open = WindowEnumerator.GetAppWindows().ToDictionary(w => w.Handle);
+            var open = openWindows.ToDictionary(w => w.Handle);
             foreach (var entry in entries)
             {
                 if (memory.Find(workflow, entry) is { } hwnd && !claimed.Contains(hwnd)
@@ -84,7 +96,7 @@ internal sealed class WorkflowRunner
             foreach (var entry in entries.Where(e => e.Tabs.Count == 0 && !reused.ContainsKey(e))
                          .OrderBy(e => e.TerminalScripts.Count == 0))
             {
-                if (FindOpenWindow(entry, claimed, hostedScripts) is { } hwnd)
+                if (FindOpenWindow(entry, openWindows, claimed, hostedScripts) is { } hwnd)
                 {
                     claimed.Add(hwnd);
                     reused[entry] = hwnd;
@@ -93,12 +105,12 @@ internal sealed class WorkflowRunner
         }
 
         if (minimize)
-            AppMinimizer.MinimizeAll(keepOpenApps, claimed, _log);
+            AppMinimizer.MinimizeAll(openWindows, keepOpenApps, claimed, _log);
         else if (closeOtherApps)
-            await AppCloser.CloseAllAsync(keepOpenApps, claimed, _log, token);
+            await AppCloser.CloseAllAsync(openWindows, keepOpenApps, claimed, _log, token);
 
         if (entries.Count == 0)
-            return (0, 0);
+            return new RunResult(0, 0, Task.CompletedTask);
 
         var needed = Math.Max(entries.Max(e => e.DesktopIndex) + 1, workflow.FinishDesktop);
         try
@@ -112,9 +124,12 @@ internal sealed class WorkflowRunner
             _log($"Could not create virtual desktops: {ex.Message}");
         }
 
-        var preExisting = WindowEnumerator.GetAppWindows().Select(w => w.Handle).ToHashSet();
+        // Minimizing doesn't open or close windows, so the first look is still current; closing changed them.
+        var preExisting = (minimize || !closeOtherApps ? openWindows : WindowEnumerator.GetAppWindows())
+            .Select(w => w.Handle).ToHashSet();
         var windows = new WindowSnapshot();
         var placed = new List<(WindowEntry Entry, IntPtr Handle)>();
+        var launched = new HashSet<IntPtr>();
 
         // Restores the windows of one app, one after the other.
         async Task RestoreAsync(IEnumerable<WindowEntry> appEntries)
@@ -142,6 +157,7 @@ internal sealed class WorkflowRunner
                     }
                     // Give the app a moment to finish restoring its own saved layout before we override it.
                     await Task.Delay(500, token);
+                    launched.Add(hwnd.Value);
                 }
 
                 claimed.Add(hwnd.Value);
@@ -173,20 +189,37 @@ internal sealed class WorkflowRunner
                 _log($"Could not switch to desktop {index + 1}.");
         }
 
-        // Some apps (browsers, Electron apps, ...) move or resize themselves once they finish loading,
-        // sometimes seconds later; enforce the layout again on the windows that drifted.
-        foreach (var delay in CorrectionDelays)
-        {
-            await Task.Delay(delay, token);
-            foreach (var (entry, handle) in placed)
-            {
-                if (IsWindow(handle))
-                    Apply(entry, handle, firstPass: false);
-            }
-        }
-
         _log($"Done: {placed.Count} of {entries.Count} windows restored.");
-        return (placed.Count, entries.Count);
+
+        // Some apps (browsers, Electron apps, ...) move or resize themselves once they finish loading,
+        // sometimes seconds later; enforce the layout again on the windows that drifted. Only freshly launched
+        // apps do that, and the run is already finished for the user, so this happens in the background.
+        var toSettle = placed.Where(p => launched.Contains(p.Handle)).ToList();
+        var settled = toSettle.Count == 0 ? Task.CompletedTask : SettleAsync(toSettle, settleToken);
+        return new RunResult(placed.Count, entries.Count, settled);
+    }
+
+    private async Task SettleAsync(List<(WindowEntry Entry, IntPtr Handle)> windows, CancellationToken token)
+    {
+        try
+        {
+            var corrected = new HashSet<IntPtr>();
+            foreach (var delay in CorrectionDelays)
+            {
+                await Task.Delay(delay, token);
+                foreach (var (entry, handle) in windows)
+                {
+                    if (IsWindow(handle) && Apply(entry, handle, firstPass: false))
+                        corrected.Add(handle);
+                }
+            }
+            if (corrected.Count > 0)
+                _log($"  Put back {corrected.Count} window(s) that moved themselves after starting.");
+        }
+        catch (OperationCanceledException)
+        {
+            // another workflow took over these windows
+        }
     }
 
     private static bool Matches(WindowEntry entry, WindowInfo window)
@@ -205,10 +238,10 @@ internal sealed class WorkflowRunner
     private static string AppKey(WindowEntry entry) =>
         entry.IsPackaged ? entry.AppUserModelId : entry.ExecutablePath;
 
-    private static IntPtr? FindOpenWindow(
-        WindowEntry entry, HashSet<IntPtr> claimed, Dictionary<IntPtr, List<HostedScript>> hostedScripts)
+    private static IntPtr? FindOpenWindow(WindowEntry entry, List<WindowInfo> openWindows,
+        HashSet<IntPtr> claimed, Dictionary<IntPtr, List<HostedScript>> hostedScripts)
     {
-        var candidates = WindowEnumerator.GetAppWindows()
+        var candidates = openWindows
             .Where(w => !claimed.Contains(w.Handle) && Matches(entry, w) && RunsSameScripts(entry, w, hostedScripts))
             .ToList();
 
@@ -316,7 +349,8 @@ internal sealed class WorkflowRunner
         }
     }
 
-    private void Apply(WindowEntry entry, IntPtr hwnd, bool firstPass)
+    /// <returns>For a correction pass, whether the window had drifted and was put back.</returns>
+    private bool Apply(WindowEntry entry, IntPtr hwnd, bool firstPass)
     {
         // Position the window while it is still on the current desktop: changing the state of a
         // window on another desktop can make Windows switch to that desktop.
@@ -327,9 +361,9 @@ internal sealed class WorkflowRunner
             _log($"  {entry.ProcessName}: could not move to desktop {entry.DesktopIndex + 1} ({error}).");
 
         if (!firstPass)
-            CorrectPlacement(entry, hwnd);
-        else
-            _log($"  {entry.ProcessName}: placed on desktop {entry.DesktopIndex + 1}.");
+            return CorrectPlacement(entry, hwnd);
+        _log($"  {entry.ProcessName}: placed on desktop {entry.DesktopIndex + 1}.");
+        return false;
     }
 
     /// <summary>Saved bounds in both coordinate systems: screen (SetWindowPos) and workspace (SetWindowPlacement).</summary>
@@ -377,11 +411,11 @@ internal sealed class WorkflowRunner
     }
 
     /// <summary>Correction pass: only touch windows that drifted, and never re-activate maximized ones.</summary>
-    private static void CorrectPlacement(WindowEntry entry, IntPtr hwnd)
+    private static bool CorrectPlacement(WindowEntry entry, IntPtr hwnd)
     {
         var placement = WINDOWPLACEMENT.Create();
         if (!GetWindowPlacement(hwnd, ref placement))
-            return;
+            return false;
 
         var (screen, workspace) = GetTargetBounds(entry);
         bool boundsOk;
@@ -397,8 +431,10 @@ internal sealed class WorkflowRunner
             _ => placement.showCmd is not (SW_SHOWMAXIMIZED or SW_SHOWMINIMIZED or SW_MINIMIZE or SW_SHOWMINNOACTIVE),
         };
 
-        if (!boundsOk || !stateOk)
-            ApplyPlacement(entry, hwnd);
+        if (boundsOk && stateOk)
+            return false;
+        ApplyPlacement(entry, hwnd);
+        return true;
     }
 
     private static bool SameRect(RECT a, RECT b) =>

@@ -32,30 +32,77 @@ internal static class WindowEnumerator
         "LockApp", "SystemSettingsBroker", "ShellHost", "Widgets", "WidgetBoard",
     };
 
+    /// <summary>
+    /// Executable path and AppUserModelID per process, so that listing the windows (which happens several times
+    /// a second while a workflow runs) doesn't query every process again each time. Each entry keeps a handle to
+    /// its process open: while that handle is held, Windows cannot give the process id to a new process, so a
+    /// cached entry always describes the process that now has that id.
+    /// </summary>
+    private sealed record ProcessInfo(IntPtr Handle, string ExecutablePath, string AppUserModelId);
+
+    private static readonly Dictionary<uint, ProcessInfo> ProcessCache = new();
+    private static readonly object CacheLock = new();
+
     public static List<WindowInfo> GetAppWindows()
     {
         var ownPid = (uint)Environment.ProcessId;
         var result = new List<WindowInfo>();
 
-        EnumWindows((hwnd, _) =>
+        lock (CacheLock)
         {
-            try
+            var seen = new HashSet<uint>();
+            EnumWindows((hwnd, _) =>
             {
-                var info = TryDescribe(hwnd);
-                if (info != null && info.ProcessId != ownPid && !IgnoredProcesses.Contains(info.ProcessName))
-                    result.Add(info);
-            }
-            catch
+                try
+                {
+                    var info = TryDescribe(hwnd, seen);
+                    if (info != null && info.ProcessId != ownPid && !IgnoredProcesses.Contains(info.ProcessName))
+                        result.Add(info);
+                }
+                catch
+                {
+                    // window vanished or access denied – ignore it
+                }
+                return true;
+            }, IntPtr.Zero);
+
+            // Let go of processes that no longer have a window, so their ids can be reused.
+            foreach (var pid in ProcessCache.Keys.Where(pid => !seen.Contains(pid)).ToList())
             {
-                // window vanished or access denied – ignore it
+                CloseHandle(ProcessCache[pid].Handle);
+                ProcessCache.Remove(pid);
             }
-            return true;
-        }, IntPtr.Zero);
+        }
 
         return result;
     }
 
-    private static WindowInfo? TryDescribe(IntPtr hwnd)
+    /// <summary>Cached path and AppUserModelID of a process; null when it cannot be opened. Call with <see cref="CacheLock"/> held.</summary>
+    private static ProcessInfo? GetProcessInfo(uint pid, HashSet<uint> seen)
+    {
+        seen.Add(pid);
+        if (ProcessCache.TryGetValue(pid, out var cached))
+            return cached;
+
+        var handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        if (handle == IntPtr.Zero)
+            return null;
+        var size = 1024;
+        var path = new StringBuilder(size);
+        if (!QueryFullProcessImageName(handle, 0, path, ref size))
+        {
+            CloseHandle(handle);
+            return null;
+        }
+        var length = 512;
+        var aumid = new StringBuilder(length);
+        var info = new ProcessInfo(handle, path.ToString(),
+            GetApplicationUserModelId(handle, ref length, aumid) == 0 ? aumid.ToString() : "");
+        ProcessCache[pid] = info;
+        return info;
+    }
+
+    private static WindowInfo? TryDescribe(IntPtr hwnd, HashSet<uint> seen)
     {
         if (!IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER) != IntPtr.Zero)
             return null;
@@ -85,11 +132,10 @@ internal static class WindowEnumerator
             pid = childPid;
         }
 
-        var exe = GetProcessPath(pid);
-        if (exe == null)
+        if (GetProcessInfo(pid, seen) is not { } process)
             return null;
 
-        return new WindowInfo(hwnd, title, className, pid, exe, GetAppUserModelId(pid) ?? "");
+        return new WindowInfo(hwnd, title, className, pid, process.ExecutablePath, process.AppUserModelId);
     }
 
     private static uint FindCoreWindowProcess(IntPtr frame, uint framePid)

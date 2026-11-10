@@ -16,17 +16,18 @@ internal static class AppCloser
     private static readonly TimeSpan ReopenWatch = TimeSpan.FromSeconds(1);
     private const int MaxRetries = 3;
 
+    /// <param name="openWindows">The open app windows, as just listed by <see cref="WindowEnumerator.GetAppWindows"/>.</param>
     /// <param name="keepOpenApps">Executable names (with or without ".exe") of apps to leave running.</param>
     /// <param name="keepWindows">Individual windows to leave open, e.g. ones the next workflow will reuse.</param>
-    public static async Task CloseAllAsync(IEnumerable<string> keepOpenApps, IReadOnlySet<IntPtr> keepWindows,
-        Action<string> log, CancellationToken token = default)
+    public static async Task CloseAllAsync(IEnumerable<WindowInfo> openWindows, IEnumerable<string> keepOpenApps,
+        IReadOnlySet<IntPtr> keepWindows, Action<string> log, CancellationToken token = default)
     {
         // Never close FastFlow itself, including another FastFlow instance (e.g. the tray one when run with --run).
         var ownExe = Environment.ProcessPath ?? "";
         var keep = keepOpenApps.Select(NormalizeAppName).Where(n => n.Length > 0)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var candidates = WindowEnumerator.GetAppWindows()
-            .Where(w => !string.Equals(w.ExecutablePath, ownExe, StringComparison.OrdinalIgnoreCase))
+        var candidates = openWindows
+            .Where(w => IsWindow(w.Handle) && !string.Equals(w.ExecutablePath, ownExe, StringComparison.OrdinalIgnoreCase))
             .ToList();
         var kept = candidates.Where(w => keep.Contains(w.ProcessName)).ToList();
         var reused = candidates.Where(w => keepWindows.Contains(w.Handle)).Except(kept).ToList();

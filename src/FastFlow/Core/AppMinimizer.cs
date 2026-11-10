@@ -8,16 +8,18 @@ namespace FastFlow.Core;
 /// </summary>
 internal static class AppMinimizer
 {
+    /// <param name="openWindows">The open app windows, as just listed by <see cref="WindowEnumerator.GetAppWindows"/>.</param>
     /// <param name="keepOpenApps">Executable names (with or without ".exe") of apps to leave alone.</param>
     /// <param name="keepWindows">Individual windows to leave alone, e.g. ones the next workflow will reuse.</param>
-    public static void MinimizeAll(IEnumerable<string> keepOpenApps, IReadOnlySet<IntPtr> keepWindows, Action<string> log)
+    public static void MinimizeAll(IEnumerable<WindowInfo> openWindows, IEnumerable<string> keepOpenApps,
+        IReadOnlySet<IntPtr> keepWindows, Action<string> log)
     {
         // Never touch FastFlow itself, including another FastFlow instance (e.g. the tray one when run with --run).
         var ownExe = Environment.ProcessPath ?? "";
         var keep = keepOpenApps.Select(AppCloser.NormalizeAppName).Where(n => n.Length > 0)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var candidates = WindowEnumerator.GetAppWindows()
-            .Where(w => !string.Equals(w.ExecutablePath, ownExe, StringComparison.OrdinalIgnoreCase))
+        var candidates = openWindows
+            .Where(w => IsWindow(w.Handle) && !string.Equals(w.ExecutablePath, ownExe, StringComparison.OrdinalIgnoreCase))
             .ToList();
         var kept = candidates.Where(w => keep.Contains(w.ProcessName)).ToList();
         var reused = candidates.Where(w => keepWindows.Contains(w.Handle)).Except(kept).ToList();
