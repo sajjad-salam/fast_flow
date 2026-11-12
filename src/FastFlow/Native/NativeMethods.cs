@@ -201,6 +201,11 @@ internal static class NativeMethods
     public const int SW_SHOWMAXIMIZED = 3;
     public const int SW_SHOWNOACTIVATE = 4;
     public const int SW_MINIMIZE = 6;
+    public const int SW_RESTORE = 9;
+    public const uint SWP_NOSIZE = 0x0001;
+    public const uint SWP_NOMOVE = 0x0002;
+    /// <summary>WINDOWPLACEMENT.flags: a minimized window goes back to maximized when restored.</summary>
+    public const int WPF_RESTORETOMAXIMIZED = 0x0002;
     public const int SW_SHOWMINNOACTIVE = 7;
 
     public const uint SWP_NOZORDER = 0x0004;

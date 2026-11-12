@@ -200,9 +200,10 @@ internal sealed class WorkflowRunner
     }
 
     /// <summary>
-    /// Runs a desktop flow: goes to its desktop (creating it if needed) and opens its apps there, without closing
-    /// or minimizing anything else. Windows it opened last time that are still around, or a matching window that
-    /// is already on that desktop, are reused rather than opened a second time.
+    /// Runs a desktop flow: goes to its desktop (creating it if needed) and makes sure every one of its apps is open
+    /// there, shown – not minimized – at its recorded size and position. Nothing else is closed or minimized.
+    /// An app that is already open, on any desktop and minimized or not, has its window brought over instead of a
+    /// second copy being started; only apps that aren't open are launched.
     /// </summary>
     public async Task<RunResult> RunDesktopFlowAsync(Workflow workflow, CancellationToken token = default,
         CancellationToken settleToken = default)
@@ -232,9 +233,14 @@ internal sealed class WorkflowRunner
         if (entries.Count == 0)
             return new RunResult(0, 0, Task.CompletedTask);
 
-        // Every window goes to the flow's desktop, whatever the grid says.
+        // Every window goes to the flow's desktop, whatever the grid says, and is shown: a desktop flow is for
+        // getting straight to work, so a window recorded while minimized comes back up too.
         foreach (var entry in entries)
+        {
             entry.DesktopIndex = index;
+            if (entry.State == WindowState.Minimized)
+                entry.State = WindowState.Normal;
+        }
 
         var memory = WindowMemory.Load();
         var openWindows = WindowEnumerator.GetAppWindows();
@@ -245,7 +251,7 @@ internal sealed class WorkflowRunner
         var reused = new Dictionary<WindowEntry, IntPtr>();
         foreach (var entry in entries)
         {
-            // The window this flow opened last time, wherever it is now.
+            // The window this flow used last time, wherever it is now.
             if (memory.Find(workflow, entry) is { } hwnd && !claimed.Contains(hwnd)
                 && open.TryGetValue(hwnd, out var window) && Matches(entry, window))
             {
@@ -253,22 +259,26 @@ internal sealed class WorkflowRunner
                 reused[entry] = hwnd;
             }
         }
-        foreach (var entry in entries.Where(e => !reused.ContainsKey(e)))
+
+        // Otherwise a window of the same app that is already open anywhere: bring it here rather than start a
+        // second copy (which single-instance apps wouldn't open anyway). Terminals running a script pick first.
+        var hostedScripts = entries.Any(e => !reused.ContainsKey(e)
+                                             && (e.TerminalScripts.Count > 0 || TerminalCommands.IsWindowsTerminal(e.ProcessName)))
+            ? TerminalCommands.FindHostedScripts()
+            : new Dictionary<IntPtr, List<HostedScript>>();
+        foreach (var entry in entries.Where(e => !reused.ContainsKey(e)).OrderBy(e => e.TerminalScripts.Count == 0))
         {
-            // Or the same app already open on this desktop, so running the flow twice doesn't open it twice.
-            var onDesktop = openWindows.FirstOrDefault(w => !claimed.Contains(w.Handle) && Matches(entry, w)
-                && target != null && _desktops.GetWindowDesktopId(w.Handle) == target);
-            if (onDesktop != null)
+            if (FindWindowForFlow(entry, openWindows, claimed, hostedScripts, target) is { } hwnd)
             {
-                claimed.Add(onDesktop.Handle);
-                reused[entry] = onDesktop.Handle;
+                claimed.Add(hwnd);
+                reused[entry] = hwnd;
             }
         }
 
         var preExisting = openWindows.Select(w => w.Handle).ToHashSet();
         var windows = new WindowSnapshot();
         var placed = new List<(WindowEntry Entry, IntPtr Handle)>();
-        var launched = new HashSet<IntPtr>();
+        var missing = new List<string>();
 
         async Task RestoreAsync(IEnumerable<WindowEntry> appEntries)
         {
@@ -280,36 +290,32 @@ internal sealed class WorkflowRunner
                 if (reused.TryGetValue(entry, out var existing) && IsWindow(existing))
                 {
                     hwnd = existing;
-                    _log($"  {entry.ProcessName}: reusing open window \"{WindowEnumerator.GetTitle(existing)}\"");
+                    _log($"  {entry.ProcessName}: already open{(IsIconic(existing) ? " (minimized)" : "")}, "
+                         + $"bringing \"{WindowEnumerator.GetTitle(existing)}\" here.");
                 }
 
                 if (hwnd == null)
                 {
                     if (!Launch(entry))
+                    {
+                        missing.Add(entry.ProcessName);
                         continue;
-                    // Single-instance apps bring back the window they already have instead of opening one.
+                    }
+                    // Apps that were hidden in the tray, or single-instance apps, may bring back a window they had.
                     hwnd = await WaitForNewWindowAsync(entry, preExisting, claimed, windows, token, fallbackToExisting: true);
                     if (hwnd == null)
                     {
                         _log($"  {entry.ProcessName}: no window appeared within {WindowTimeout.TotalSeconds:0}s, skipped.");
+                        missing.Add(entry.ProcessName);
                         continue;
                     }
+                    // Give the app a moment to finish restoring its own saved layout before we override it.
                     if (!preExisting.Contains(hwnd.Value))
-                    {
                         await Task.Delay(500, token);
-                        launched.Add(hwnd.Value);
-                    }
-                    else
-                    {
-                        _log($"  {entry.ProcessName}: was already running, moving its window here.");
-                    }
                 }
 
                 claimed.Add(hwnd.Value);
-                // Bring a window from another desktop over before touching it: changing the state of a window on
-                // another desktop can make Windows switch there. Then set its saved state, which also un-minimizes it.
-                _desktops.MoveWindowToDesktop(hwnd.Value, index, out _);
-                Apply(entry, hwnd.Value, firstPass: true);
+                await ShowOnDesktopAsync(entry, hwnd.Value, index, token);
                 placed.Add((entry, hwnd.Value));
             }
         }
@@ -317,17 +323,84 @@ internal sealed class WorkflowRunner
         await Task.WhenAll(entries.GroupBy(AppKey, StringComparer.OrdinalIgnoreCase).Select(RestoreAsync));
         memory.Save(workflow, placed);
 
-        // An app that was already running on another desktop may have pulled us there when it activated itself.
+        // Restoring an app that was on another desktop may have pulled us there; come back.
         if (switched && placed.Count > 0)
             _desktops.SwitchToDesktop(index);
-        // Leave the flow's first window in front, ready to use.
-        if (placed.FirstOrDefault(p => p.Entry.State != WindowState.Minimized) is { Handle: var front } && front != IntPtr.Zero)
-            SetForegroundWindow(front);
 
-        _log($"Done: {placed.Count} of {entries.Count} windows opened on desktop {index + 1}.");
-        var toSettle = placed.Where(p => launched.Contains(p.Handle)).ToList();
-        var settled = toSettle.Count == 0 ? Task.CompletedTask : SettleAsync(toSettle, settleToken);
+        // Stack the windows as recorded, all above whatever else is on the desktop, with the first one in front.
+        for (var i = placed.Count - 1; i >= 0; i--)
+        {
+            SetWindowPos(placed[i].Handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        }
+        if (placed.Count > 0)
+            SetForegroundWindow(placed[0].Handle);
+
+        _log(missing.Count == 0
+            ? $"Done: all {placed.Count} windows are open on desktop {index + 1}."
+            : $"Done: {placed.Count} of {entries.Count} windows open on desktop {index + 1}; could not open {string.Join(", ", missing)}.");
+
+        // Check every window again a few seconds later – launched apps move themselves once loaded, and restored
+        // ones can be re-minimized or moved by their app – and put back any that aren't shown where they belong.
+        var settled = placed.Count == 0 ? Task.CompletedTask : SettleAsync(placed, settleToken);
         return new RunResult(placed.Count, entries.Count, settled);
+    }
+
+    /// <summary>
+    /// Moves a window to desktop <paramref name="index"/>, un-minimizes it and puts it at the entry's size and position.
+    /// It is moved first: changing the state of a window on another desktop can make Windows switch there.
+    /// </summary>
+    private async Task ShowOnDesktopAsync(WindowEntry entry, IntPtr hwnd, int index, CancellationToken token)
+    {
+        if (!_desktops.MoveWindowToDesktop(hwnd, index, out var error))
+            _log($"  {entry.ProcessName}: could not move to desktop {index + 1} ({error}).");
+
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            if (IsIconic(hwnd))
+            {
+                // A real restore, like clicking it in the taskbar: some apps ignore a placement change while minimized.
+                ShowWindowAsync(hwnd, SW_RESTORE);
+                for (var wait = 0; wait < 10 && IsIconic(hwnd); wait++)
+                    await Task.Delay(50, token);
+            }
+            ApplyPlacement(entry, hwnd);
+            if (!IsIconic(hwnd))
+                break;
+            await Task.Delay(150, token);
+        }
+
+        if (IsIconic(hwnd))
+            _log($"  {entry.ProcessName}: stayed minimized.");
+        else
+            _log($"  {entry.ProcessName}: shown on desktop {index + 1}.");
+    }
+
+    /// <summary>
+    /// An open window a desktop flow can use for <paramref name="entry"/>, on any desktop: one already on the flow's
+    /// desktop first, then one with the same title. Browser windows with saved tabs are opened fresh with their tabs,
+    /// and a folder window is only used when it shows the same folder.
+    /// </summary>
+    private IntPtr? FindWindowForFlow(WindowEntry entry, List<WindowInfo> openWindows, HashSet<IntPtr> claimed,
+        Dictionary<IntPtr, List<HostedScript>> hostedScripts, Guid? target)
+    {
+        if (entry.Tabs.Count > 0)
+            return null;
+
+        var candidates = openWindows
+            .Where(w => !claimed.Contains(w.Handle) && IsWindow(w.Handle) && Matches(entry, w)
+                        && RunsSameScripts(entry, w, hostedScripts))
+            .Where(w => entry.WindowClass != "CabinetWClass" || w.Title == entry.Title)
+            .ToList();
+        if (candidates.Count == 0)
+            return null;
+
+        bool OnTarget(WindowInfo w) => target != null && _desktops.GetWindowDesktopId(w.Handle) == target;
+        var best = candidates.FirstOrDefault(w => OnTarget(w) && w.Title == entry.Title)
+                   ?? candidates.FirstOrDefault(OnTarget)
+                   ?? candidates.FirstOrDefault(w => w.Title == entry.Title)
+                   ?? candidates.FirstOrDefault(w => w.ClassName == entry.WindowClass)
+                   ?? candidates[0];
+        return best.Handle;
     }
 
     private async Task SettleAsync(List<(WindowEntry Entry, IntPtr Handle)> windows, CancellationToken token)

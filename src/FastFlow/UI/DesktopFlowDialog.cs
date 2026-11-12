@@ -14,7 +14,8 @@ internal sealed class DesktopFlowDialog : Form
     private sealed record WindowItem(WindowInfo Window)
     {
         public override string ToString() =>
-            string.IsNullOrWhiteSpace(Window.Title) ? Window.ProcessName : $"{Window.ProcessName}  —  {Window.Title}";
+            (string.IsNullOrWhiteSpace(Window.Title) ? Window.ProcessName : $"{Window.ProcessName}  —  {Window.Title}")
+            + (FastFlow.Native.NativeMethods.IsIconic(Window.Handle) ? "  (minimized)" : "");
     }
 
     private readonly TextBox _name;

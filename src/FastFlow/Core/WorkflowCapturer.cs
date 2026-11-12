@@ -17,7 +17,7 @@ internal sealed class WorkflowCapturer
     /// </summary>
     public Workflow CaptureDesktopFlow(string name, IReadOnlyCollection<IntPtr> handles, int targetDesktop)
     {
-        var workflow = Capture(name, handles);
+        var workflow = Capture(name, handles, showMinimized: true);
         workflow.Kind = WorkflowKind.Desktop;
         workflow.TargetDesktop = Math.Max(1, targetDesktop);
         foreach (var entry in workflow.Windows)
@@ -26,7 +26,8 @@ internal sealed class WorkflowCapturer
     }
 
     /// <param name="only">Capture just these windows instead of every open one.</param>
-    public Workflow Capture(string name, IReadOnlyCollection<IntPtr>? only = null)
+    /// <param name="showMinimized">Save a minimized window as the state it restores to, so it is shown when run.</param>
+    public Workflow Capture(string name, IReadOnlyCollection<IntPtr>? only = null, bool showMinimized = false)
     {
         var desktopIds = _desktops.GetDesktopIds();
         var workflow = new Workflow
@@ -60,6 +61,8 @@ internal sealed class WorkflowCapturer
                 SW_SHOWMINIMIZED or SW_MINIMIZE or SW_SHOWMINNOACTIVE => WindowState.Minimized,
                 _ => WindowState.Normal,
             };
+            if (showMinimized && state == WindowState.Minimized)
+                state = (placement.flags & WPF_RESTORETOMAXIMIZED) != 0 ? WindowState.Maximized : WindowState.Normal;
             var rect = GetBounds(window.Handle, state, placement);
 
             var tabs = BrowserTabs.IsBrowser(window.ProcessName) && string.IsNullOrEmpty(window.AppUserModelId)
