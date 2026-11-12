@@ -332,6 +332,7 @@ internal sealed class MainForm : Form
         ShowListState();
         ShowSelected();
         Log($"Workflows are stored in {_store.FilePath}");
+        Log($"Log file: {FileLog.FilePath}");
     }
 
     private void StyleGrid()
@@ -541,6 +542,7 @@ internal sealed class MainForm : Form
             catch (Exception ex)
             {
                 Log($"Error: {ex.Message}");
+                FileLog.Error($"Command \"{text}\" failed", ex);
                 MessageBox.Show(this, ex.Message, "FastFlow", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         };
@@ -726,6 +728,7 @@ internal sealed class MainForm : Form
         catch (Exception ex)
         {
             Log($"Run failed: {ex.Message}");
+            FileLog.Error($"Run of \"{workflow.Name}\" failed", ex);
         }
         finally
         {
@@ -1226,5 +1229,6 @@ internal sealed class MainForm : Form
     private void Log(string message)
     {
         _log.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
+        FileLog.Info(message);
     }
 }

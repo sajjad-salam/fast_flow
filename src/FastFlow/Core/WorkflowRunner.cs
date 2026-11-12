@@ -210,6 +210,9 @@ internal sealed class WorkflowRunner
     {
         var entries = workflow.Windows.Where(w => w.Enabled).ToList();
         var index = Math.Max(0, workflow.TargetDesktop - 1);
+        FileLog.Debug($"=== Desktop flow \"{workflow.Name}\" ({workflow.Id}), target desktop {index + 1}, "
+                      + $"{entries.Count}/{workflow.Windows.Count} entries enabled. Backend: {_desktops.Status}. "
+                      + $"Desktops: {_desktops.GetDesktopIds().Count}. Foreground: {Describe(GetForegroundWindow())}");
         _log($"Running desktop flow \"{workflow.Name}\" on desktop {index + 1} ({entries.Count} windows)...");
 
         try
@@ -225,6 +228,7 @@ internal sealed class WorkflowRunner
 
         // Go there first, so apps that are launched open on that desktop by themselves.
         var switched = _desktops.SwitchToDesktop(index);
+        FileLog.Debug($"SwitchToDesktop({index + 1}) = {switched}");
         if (switched)
             _log($"Switched to desktop {index + 1}.");
         else if (_desktops.CanMoveWindows)
@@ -247,6 +251,21 @@ internal sealed class WorkflowRunner
         var open = openWindows.ToDictionary(w => w.Handle);
         var ids = _desktops.GetDesktopIds();
         Guid? target = index < ids.Count ? ids[index] : null;
+        FileLog.Debug($"Open app windows: {openWindows.Count}. Target desktop id: {target}");
+        foreach (var entry in entries)
+        {
+            FileLog.Debug($"Entry #{workflow.Windows.IndexOf(entry)} {entry.ProcessName}: exe=\"{entry.ExecutablePath}\" "
+                          + $"aumid=\"{entry.AppUserModelId}\" class={entry.WindowClass} title=\"{entry.Title}\" state={entry.State} "
+                          + $"bounds=({entry.Left},{entry.Top} {entry.Width}x{entry.Height}) screen={entry.ScreenCoordinates} "
+                          + $"tabs={entry.Tabs.Count} scripts={entry.TerminalScripts.Count} remembered={memory.Find(workflow, entry)?.ToString("X") ?? "none"}");
+            var related = openWindows.Where(w =>
+                string.Equals(w.ProcessName, entry.ProcessName, StringComparison.OrdinalIgnoreCase)
+                || (entry.IsPackaged && string.Equals(w.AppUserModelId, entry.AppUserModelId, StringComparison.OrdinalIgnoreCase))).ToList();
+            if (related.Count == 0)
+                FileLog.Debug("    no open window of this app");
+            foreach (var w in related)
+                FileLog.Debug($"    candidate matches={Matches(entry, w)} exe=\"{w.ExecutablePath}\" aumid=\"{w.AppUserModelId}\" {Describe(w.Handle)}");
+        }
         var claimed = new HashSet<IntPtr>();
         var reused = new Dictionary<WindowEntry, IntPtr>();
         foreach (var entry in entries)
@@ -274,6 +293,10 @@ internal sealed class WorkflowRunner
                 reused[entry] = hwnd;
             }
         }
+
+        foreach (var entry in entries)
+            FileLog.Debug($"Decision for {entry.ProcessName}: "
+                          + (reused.TryGetValue(entry, out var use) ? $"reuse {use:X}" : "launch"));
 
         var preExisting = openWindows.Select(w => w.Handle).ToHashSet();
         var windows = new WindowSnapshot();
@@ -303,6 +326,7 @@ internal sealed class WorkflowRunner
                     }
                     // Apps that were hidden in the tray, or single-instance apps, may bring back a window they had.
                     hwnd = await WaitForNewWindowAsync(entry, preExisting, claimed, windows, token, fallbackToExisting: true);
+                    FileLog.Debug($"{entry.ProcessName}: waited for window -> {(hwnd is { } got ? $"{got:X} (pre-existing={preExisting.Contains(got)})" : "none")}");
                     if (hwnd == null)
                     {
                         _log($"  {entry.ProcessName}: no window appeared within {WindowTimeout.TotalSeconds:0}s, skipped.");
@@ -333,7 +357,13 @@ internal sealed class WorkflowRunner
             SetWindowPos(placed[i].Handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
         }
         if (placed.Count > 0)
-            SetForegroundWindow(placed[0].Handle);
+        {
+            var foreground = SetForegroundWindow(placed[0].Handle);
+            FileLog.Debug($"SetForegroundWindow({placed[0].Handle:X}) = {foreground}");
+        }
+        foreach (var (entry, handle) in placed)
+            FileLog.Debug($"After run {entry.ProcessName}: {Describe(handle)}");
+        FileLog.Debug($"Foreground now: {Describe(GetForegroundWindow())}");
 
         _log(missing.Count == 0
             ? $"Done: all {placed.Count} windows are open on desktop {index + 1}."
@@ -351,7 +381,10 @@ internal sealed class WorkflowRunner
     /// </summary>
     private async Task ShowOnDesktopAsync(WindowEntry entry, IntPtr hwnd, int index, CancellationToken token)
     {
-        if (!_desktops.MoveWindowToDesktop(hwnd, index, out var error))
+        FileLog.Debug($"{entry.ProcessName}: before   {Describe(hwnd)}");
+        var moved = _desktops.MoveWindowToDesktop(hwnd, index, out var error);
+        FileLog.Debug($"{entry.ProcessName}: MoveWindowToDesktop({index + 1}) = {moved}{(error != null ? $" ({error})" : "")} -> {Describe(hwnd)}");
+        if (!moved)
             _log($"  {entry.ProcessName}: could not move to desktop {index + 1} ({error}).");
 
         for (var attempt = 0; attempt < 3; attempt++)
@@ -359,11 +392,13 @@ internal sealed class WorkflowRunner
             if (IsIconic(hwnd))
             {
                 // A real restore, like clicking it in the taskbar: some apps ignore a placement change while minimized.
-                ShowWindowAsync(hwnd, SW_RESTORE);
+                var shown = ShowWindowAsync(hwnd, SW_RESTORE);
                 for (var wait = 0; wait < 10 && IsIconic(hwnd); wait++)
                     await Task.Delay(50, token);
+                FileLog.Debug($"{entry.ProcessName}: attempt {attempt + 1} ShowWindowAsync(SW_RESTORE) = {shown} -> {Describe(hwnd)}");
             }
             ApplyPlacement(entry, hwnd);
+            FileLog.Debug($"{entry.ProcessName}: attempt {attempt + 1} ApplyPlacement -> {Describe(hwnd)}");
             if (!IsIconic(hwnd))
                 break;
             await Task.Delay(150, token);
@@ -414,7 +449,10 @@ internal sealed class WorkflowRunner
                 foreach (var (entry, handle) in windows)
                 {
                     if (IsWindow(handle) && Apply(entry, handle, firstPass: false))
+                    {
                         corrected.Add(handle);
+                        FileLog.Debug($"Settle: put back {entry.ProcessName} -> {Describe(handle)}");
+                    }
                 }
             }
             if (corrected.Count > 0)
@@ -423,6 +461,34 @@ internal sealed class WorkflowRunner
         catch (OperationCanceledException)
         {
             // another workflow took over these windows
+        }
+    }
+
+    /// <summary>One line describing a window's state, for the log file.</summary>
+    private string Describe(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero)
+            return "(none)";
+        if (!IsWindow(hwnd))
+            return $"{hwnd:X} (gone)";
+        try
+        {
+            GetWindowThreadProcessId(hwnd, out var pid);
+            var placement = WINDOWPLACEMENT.Create();
+            GetWindowPlacement(hwnd, ref placement);
+            GetWindowRect(hwnd, out var rect);
+            DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, out var cloaked, sizeof(int));
+            var desktopId = _desktops.GetWindowDesktopId(hwnd);
+            var desktop = desktopId is { } id ? _desktops.GetDesktopIds().IndexOf(id) + 1 : 0;
+            return $"{hwnd:X} pid={pid} \"{WindowEnumerator.GetTitle(hwnd)}\" class={WindowEnumerator.GetClass(hwnd)} "
+                   + $"visible={IsWindowVisible(hwnd)} iconic={IsIconic(hwnd)} zoomed={IsZoomed(hwnd)} cloaked={cloaked} "
+                   + $"desktop={desktop} showCmd={placement.showCmd} flags={placement.flags} "
+                   + $"rect=({rect.Left},{rect.Top},{rect.Right},{rect.Bottom}) "
+                   + $"normal=({placement.rcNormalPosition.Left},{placement.rcNormalPosition.Top},{placement.rcNormalPosition.Right},{placement.rcNormalPosition.Bottom})";
+        }
+        catch (Exception ex)
+        {
+            return $"{hwnd:X} (describe failed: {ex.Message})";
         }
     }
 
