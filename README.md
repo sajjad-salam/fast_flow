@@ -67,6 +67,18 @@ Press **`Ctrl+Alt+Space`** anywhere to open the quick switcher: type a few lette
 
 Click **Quick switcher** at the top of the manager to choose a different shortcut, or remove it. It is also in the tray menu.
 
+### Desktop flows
+
+A desktop flow is a lighter kind of workflow for getting into a task quickly: one or two apps that open on a desktop of their own. Click **New desktop flow** at the top (or pick it in the quick switcher), give it a name, tick the open windows to record, and choose the desktop number. When it runs, FastFlow:
+
+- creates that virtual desktop if it doesn't exist yet (e.g. desktop 4 when you only have 2) and switches you to it right away,
+- opens the apps there at their recorded size and position, with browser tabs, scripts and folders as in a full workflow, and puts the first one in front,
+- leaves every other app alone: nothing is closed or minimized, whatever *Close all open apps* is set to.
+
+Running the flow again doesn't open the apps a second time: a window it opened before is brought back to the flow's desktop, and so is a matching window that is already on that desktop. Single-instance apps that are already running elsewhere have their window moved over.
+
+Desktop flows show up in the list, the tray menu and the quick switcher like other workflows, and take a shortcut the same way. **Flow desktop...** changes the desktop number; **Re-capture (update)** lets you pick the windows again.
+
 ### Desktop after run
 
 Select a workflow and click **Desktop after run...** to choose which virtual desktop you end up on once all of its apps are open:

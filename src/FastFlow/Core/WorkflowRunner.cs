@@ -199,6 +199,137 @@ internal sealed class WorkflowRunner
         return new RunResult(placed.Count, entries.Count, settled);
     }
 
+    /// <summary>
+    /// Runs a desktop flow: goes to its desktop (creating it if needed) and opens its apps there, without closing
+    /// or minimizing anything else. Windows it opened last time that are still around, or a matching window that
+    /// is already on that desktop, are reused rather than opened a second time.
+    /// </summary>
+    public async Task<RunResult> RunDesktopFlowAsync(Workflow workflow, CancellationToken token = default,
+        CancellationToken settleToken = default)
+    {
+        var entries = workflow.Windows.Where(w => w.Enabled).ToList();
+        var index = Math.Max(0, workflow.TargetDesktop - 1);
+        _log($"Running desktop flow \"{workflow.Name}\" on desktop {index + 1} ({entries.Count} windows)...");
+
+        try
+        {
+            var created = _desktops.EnsureDesktopCount(index + 1);
+            if (created > 0)
+                _log($"Created {created} virtual desktop(s).");
+        }
+        catch (Exception ex)
+        {
+            _log($"Could not create virtual desktops: {ex.Message}");
+        }
+
+        // Go there first, so apps that are launched open on that desktop by themselves.
+        var switched = _desktops.SwitchToDesktop(index);
+        if (switched)
+            _log($"Switched to desktop {index + 1}.");
+        else if (_desktops.CanMoveWindows)
+            _log($"Could not switch to desktop {index + 1}.");
+
+        if (entries.Count == 0)
+            return new RunResult(0, 0, Task.CompletedTask);
+
+        // Every window goes to the flow's desktop, whatever the grid says.
+        foreach (var entry in entries)
+            entry.DesktopIndex = index;
+
+        var memory = WindowMemory.Load();
+        var openWindows = WindowEnumerator.GetAppWindows();
+        var open = openWindows.ToDictionary(w => w.Handle);
+        var ids = _desktops.GetDesktopIds();
+        Guid? target = index < ids.Count ? ids[index] : null;
+        var claimed = new HashSet<IntPtr>();
+        var reused = new Dictionary<WindowEntry, IntPtr>();
+        foreach (var entry in entries)
+        {
+            // The window this flow opened last time, wherever it is now.
+            if (memory.Find(workflow, entry) is { } hwnd && !claimed.Contains(hwnd)
+                && open.TryGetValue(hwnd, out var window) && Matches(entry, window))
+            {
+                claimed.Add(hwnd);
+                reused[entry] = hwnd;
+            }
+        }
+        foreach (var entry in entries.Where(e => !reused.ContainsKey(e)))
+        {
+            // Or the same app already open on this desktop, so running the flow twice doesn't open it twice.
+            var onDesktop = openWindows.FirstOrDefault(w => !claimed.Contains(w.Handle) && Matches(entry, w)
+                && target != null && _desktops.GetWindowDesktopId(w.Handle) == target);
+            if (onDesktop != null)
+            {
+                claimed.Add(onDesktop.Handle);
+                reused[entry] = onDesktop.Handle;
+            }
+        }
+
+        var preExisting = openWindows.Select(w => w.Handle).ToHashSet();
+        var windows = new WindowSnapshot();
+        var placed = new List<(WindowEntry Entry, IntPtr Handle)>();
+        var launched = new HashSet<IntPtr>();
+
+        async Task RestoreAsync(IEnumerable<WindowEntry> appEntries)
+        {
+            foreach (var entry in appEntries)
+            {
+                token.ThrowIfCancellationRequested();
+
+                IntPtr? hwnd = null;
+                if (reused.TryGetValue(entry, out var existing) && IsWindow(existing))
+                {
+                    hwnd = existing;
+                    _log($"  {entry.ProcessName}: reusing open window \"{WindowEnumerator.GetTitle(existing)}\"");
+                }
+
+                if (hwnd == null)
+                {
+                    if (!Launch(entry))
+                        continue;
+                    // Single-instance apps bring back the window they already have instead of opening one.
+                    hwnd = await WaitForNewWindowAsync(entry, preExisting, claimed, windows, token, fallbackToExisting: true);
+                    if (hwnd == null)
+                    {
+                        _log($"  {entry.ProcessName}: no window appeared within {WindowTimeout.TotalSeconds:0}s, skipped.");
+                        continue;
+                    }
+                    if (!preExisting.Contains(hwnd.Value))
+                    {
+                        await Task.Delay(500, token);
+                        launched.Add(hwnd.Value);
+                    }
+                    else
+                    {
+                        _log($"  {entry.ProcessName}: was already running, moving its window here.");
+                    }
+                }
+
+                claimed.Add(hwnd.Value);
+                // Bring a window from another desktop over before touching it: changing the state of a window on
+                // another desktop can make Windows switch there. Then set its saved state, which also un-minimizes it.
+                _desktops.MoveWindowToDesktop(hwnd.Value, index, out _);
+                Apply(entry, hwnd.Value, firstPass: true);
+                placed.Add((entry, hwnd.Value));
+            }
+        }
+
+        await Task.WhenAll(entries.GroupBy(AppKey, StringComparer.OrdinalIgnoreCase).Select(RestoreAsync));
+        memory.Save(workflow, placed);
+
+        // An app that was already running on another desktop may have pulled us there when it activated itself.
+        if (switched && placed.Count > 0)
+            _desktops.SwitchToDesktop(index);
+        // Leave the flow's first window in front, ready to use.
+        if (placed.FirstOrDefault(p => p.Entry.State != WindowState.Minimized) is { Handle: var front } && front != IntPtr.Zero)
+            SetForegroundWindow(front);
+
+        _log($"Done: {placed.Count} of {entries.Count} windows opened on desktop {index + 1}.");
+        var toSettle = placed.Where(p => launched.Contains(p.Handle)).ToList();
+        var settled = toSettle.Count == 0 ? Task.CompletedTask : SettleAsync(toSettle, settleToken);
+        return new RunResult(placed.Count, entries.Count, settled);
+    }
+
     private async Task SettleAsync(List<(WindowEntry Entry, IntPtr Handle)> windows, CancellationToken token)
     {
         try
@@ -306,17 +437,34 @@ internal sealed class WorkflowRunner
         }
     }
 
+    /// <param name="fallbackToExisting">
+    /// When the app opens no new window (a single-instance app that just brings back the one it has), take its
+    /// already-open window instead: right away once it comes to the front, otherwise when the wait times out.
+    /// </param>
     private static async Task<IntPtr?> WaitForNewWindowAsync(
-        WindowEntry entry, HashSet<IntPtr> preExisting, HashSet<IntPtr> claimed, WindowSnapshot windows, CancellationToken token)
+        WindowEntry entry, HashSet<IntPtr> preExisting, HashSet<IntPtr> claimed, WindowSnapshot windows, CancellationToken token,
+        bool fallbackToExisting = false)
     {
         var timer = Stopwatch.StartNew();
         while (timer.Elapsed < WindowTimeout)
         {
             await Task.Delay(PollInterval, token);
 
-            var candidates = windows.Get()
+            var all = windows.Get();
+            var candidates = all
                 .Where(w => !preExisting.Contains(w.Handle) && !claimed.Contains(w.Handle) && Matches(entry, w))
                 .ToList();
+
+            if (fallbackToExisting && candidates.Count == 0 && timer.Elapsed > ClassMismatchGrace)
+            {
+                var foreground = GetForegroundWindow();
+                if (preExisting.Contains(foreground) && !claimed.Contains(foreground)
+                    && all.FirstOrDefault(w => w.Handle == foreground) is { } active && Matches(entry, active))
+                {
+                    claimed.Add(foreground);
+                    return foreground;
+                }
+            }
 
             // Prefer the same window class (skips splash screens); accept anything after a grace period.
             var match = candidates.FirstOrDefault(w => w.ClassName == entry.WindowClass);
@@ -328,6 +476,14 @@ internal sealed class WorkflowRunner
                 claimed.Add(match.Handle);
                 return match.Handle;
             }
+        }
+
+        if (fallbackToExisting
+            && WindowEnumerator.GetAppWindows().FirstOrDefault(w => preExisting.Contains(w.Handle)
+                && !claimed.Contains(w.Handle) && Matches(entry, w)) is { } running)
+        {
+            claimed.Add(running.Handle);
+            return running.Handle;
         }
         return null;
     }

@@ -27,10 +27,31 @@ public sealed class Workflow
     /// </summary>
     public int FinishDesktop { get; set; } = FinishDesktopAutomatic;
 
+    /// <summary>
+    /// <see cref="WorkflowKind.Workspace"/>: the whole layout across desktops. <see cref="WorkflowKind.Desktop"/>:
+    /// a few apps opened on <see cref="TargetDesktop"/> without closing or minimizing anything else.
+    /// </summary>
+    public WorkflowKind Kind { get; set; } = WorkflowKind.Workspace;
+
+    /// <summary>Desktop flows: the virtual desktop (1-based) the apps open on and that you are taken to.</summary>
+    public int TargetDesktop { get; set; } = 1;
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool IsDesktopFlow => Kind == WorkflowKind.Desktop;
+
     public Hotkey? GetHotkey() => Hotkey.TryParse(Shortcut, out var hotkey) ? hotkey : null;
 
     public override string ToString() =>
         GetHotkey() is { } hotkey
             ? $"{Name}  [{hotkey}]  ({Windows.Count} windows)"
             : $"{Name}  ({Windows.Count} windows)";
+}
+
+public enum WorkflowKind
+{
+    /// <summary>Every app on every desktop; other apps are closed or minimized first.</summary>
+    Workspace,
+
+    /// <summary>One or two apps opened on a chosen desktop, leaving everything else as it is.</summary>
+    Desktop,
 }

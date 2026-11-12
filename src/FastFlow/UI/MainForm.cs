@@ -75,6 +75,7 @@ internal sealed class MainForm : Form
         Dock = DockStyle.Fill, AutoSize = true, Margin = new Padding(0, 16, 0, 4),
     };
     private PillButton _runButton = null!;
+    private PillButton _finishDesktopButton = null!;
 
     /// <summary>Command buttons, disabled while a workflow runs; the value says whether one needs a selected workflow.</summary>
     private readonly Dictionary<PillButton, bool> _commands = new();
@@ -125,6 +126,9 @@ internal sealed class MainForm : Form
         _grid.DataError += (_, e) => { e.ThrowException = false; };
         _grid.DataBindingComplete += (_, _) =>
         {
+            // A desktop flow opens every window on the flow's desktop, so a per-window desktop would mislead.
+            if (_grid.Columns[nameof(WindowEntry.DesktopNumber)] is { } desktopColumn)
+                desktopColumn.Visible = Selected is not { IsDesktopFlow: true };
             // "ExecutablePath" -> "Executable path"
             foreach (DataGridViewColumn column in _grid.Columns)
             {
@@ -138,6 +142,12 @@ internal sealed class MainForm : Form
             primary: true, needsSelection: false);
         capture.Anchor = AnchorStyles.Right;
         capture.Margin = Padding.Empty;
+        var desktopFlow = AddButton("New desktop flow", async () => await CaptureDesktopFlowAsync(replace: null),
+            needsSelection: false);
+        desktopFlow.Anchor = AnchorStyles.Right;
+        desktopFlow.Margin = new Padding(0, 0, 10, 0);
+        _tips.SetToolTip(desktopFlow, "Record one or two open apps and a desktop number. Running it takes you to that desktop "
+                                      + "(creating it if needed) and opens the apps there, without closing or minimizing anything.");
         _runButton = AddButton("Run workflow", RunSelectedAsync, primary: true);
         _runButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         _runButton.Margin = new Padding(16, 0, 0, 0);
@@ -147,7 +157,8 @@ internal sealed class MainForm : Form
                 await CaptureAsync(replace: wf);
         }));
         _actions.Controls.Add(AddButton("Set shortcut...", () => { SetShortcut(); return Task.CompletedTask; }));
-        _actions.Controls.Add(AddButton("Desktop after run...", () => { SetFinishDesktop(); return Task.CompletedTask; }));
+        _finishDesktopButton = AddButton("Desktop after run...", () => { SetFinishDesktop(); return Task.CompletedTask; });
+        _actions.Controls.Add(_finishDesktopButton);
         _actions.Controls.Add(AddButton("Rename", () => { Rename(); return Task.CompletedTask; }));
         _actions.Controls.Add(AddButton("Copy run command", () => { CopyCommand(); return Task.CompletedTask; }));
         _actions.Controls.Add(AddButton("Delete", () => { Delete(); return Task.CompletedTask; }));
@@ -173,6 +184,7 @@ internal sealed class MainForm : Form
             AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = Padding.Empty,
         };
         headerActions.Controls.Add(_switcherShortcut);
+        headerActions.Controls.Add(desktopFlow);
         headerActions.Controls.Add(capture);
         header.Controls.Add(headerActions, 1, 0);
         var hero = new TwoToneLabel
@@ -418,14 +430,24 @@ internal sealed class MainForm : Form
         {
             wf.Windows.Count == 1 ? "1 window" : $"{wf.Windows.Count} windows",
         };
-        var desktops = wf.Windows.Select(w => w.DesktopIndex).Distinct().Count();
-        if (desktops > 0)
-            parts.Add(desktops == 1 ? "1 desktop" : $"{desktops} desktops");
+        if (wf.IsDesktopFlow)
+        {
+            parts.Insert(0, $"Desktop flow → desktop {wf.TargetDesktop}");
+        }
+        else
+        {
+            var desktops = wf.Windows.Select(w => w.DesktopIndex).Distinct().Count();
+            if (desktops > 0)
+                parts.Add(desktops == 1 ? "1 desktop" : $"{desktops} desktops");
+        }
         if (withShortcut)
         {
             if (wf.GetHotkey() is { } hotkey)
                 parts.Add(hotkey.ToString());
-            parts.Add(wf.FinishDesktop switch
+            if (wf.IsDesktopFlow)
+                parts.Add("leaves other apps alone");
+            else
+                parts.Add(wf.FinishDesktop switch
             {
                 Workflow.FinishDesktopAutomatic => "ends on its desktop",
                 Workflow.FinishDesktopStay => "stays on the current desktop",
@@ -442,10 +464,12 @@ internal sealed class MainForm : Form
         {
             _title.Text = wf.Name;
             _summary.Text = Describe(wf, withShortcut: true);
+            _finishDesktopButton.Text = wf.IsDesktopFlow ? "Flow desktop..." : "Desktop after run...";
         }
         else
         {
             _title.Text = "No workflow selected";
+            _finishDesktopButton.Text = "Desktop after run...";
             _summary.Text = "Arrange your apps across your desktops, then click Capture new workflow.";
         }
         UpdateCommands();
@@ -570,6 +594,12 @@ internal sealed class MainForm : Form
 
     private async Task CaptureAsync(Workflow? replace)
     {
+        if (replace is { IsDesktopFlow: true })
+        {
+            await CaptureDesktopFlowAsync(replace);
+            return;
+        }
+
         var name = replace?.Name
                    ?? PromptDialog.Show(this, "Capture workflow", "Name for this workflow:", $"Workflow {_workflows.Count + 1}");
         if (name == null)
@@ -614,6 +644,55 @@ internal sealed class MainForm : Form
         Log($"Captured \"{name}\": {captured.Windows.Count} windows across {captured.DesktopCount} desktop(s) ({string.Join(", ", perDesktop)}).");
     }
 
+    /// <summary>Records a desktop flow: the windows picked in the dialog, opened on one desktop when it runs.</summary>
+    private async Task CaptureDesktopFlowAsync(Workflow? replace)
+    {
+        var desktopCount = Math.Max(1, _desktops.GetDesktopIds().Count);
+        var choice = DesktopFlowDialog.Show(this, replace?.Name ?? $"Desktop flow {_workflows.Count(w => w.IsDesktopFlow) + 1}",
+            replace?.TargetDesktop ?? desktopCount + 1, desktopCount, replace);
+        if (choice == null)
+            return;
+
+        // As for a full capture: get out of the way while browser tabs are read.
+        WindowState = FormWindowState.Minimized;
+        await Task.Delay(400);
+
+        Workflow captured;
+        try
+        {
+            captured = new WorkflowCapturer(_desktops).CaptureDesktopFlow(choice.Name, choice.Windows, choice.Desktop);
+        }
+        finally
+        {
+            WindowState = FormWindowState.Normal;
+            Activate();
+        }
+
+        if (captured.Windows.Count == 0)
+        {
+            Log("The windows you picked were closed before they could be recorded; nothing was saved.");
+            return;
+        }
+
+        if (replace != null)
+        {
+            captured.Id = replace.Id;
+            captured.CreatedAt = replace.CreatedAt;
+            captured.Shortcut = replace.Shortcut;
+            _workflows[_workflows.IndexOf(replace)] = captured;
+        }
+        else
+        {
+            _workflows.Add(captured);
+        }
+        _list.SelectedItem = captured;
+        ShowSelected();
+        SaveAll();
+        RegisterHotkeys();
+        Log($"Saved desktop flow \"{captured.Name}\": {string.Join(", ", captured.Windows.Select(w => w.ProcessName))} "
+            + $"open on desktop {captured.TargetDesktop}. Give it a shortcut, or run it from the quick switcher.");
+    }
+
     private async Task RunSelectedAsync()
     {
         if (Selected is { } wf)
@@ -633,8 +712,10 @@ internal sealed class MainForm : Form
         _recent.Insert(0, workflow.Id);
         try
         {
-            var (restored, total, settled) = await new WorkflowRunner(_desktops, Log)
-                .RunAsync(workflow, _reuse.Checked, _closeOthers.Checked, _minimize.Checked, _settings.KeepOpenApps,
+            var runner = new WorkflowRunner(_desktops, Log);
+            var (restored, total, settled) = workflow.IsDesktopFlow
+                ? await runner.RunDesktopFlowAsync(workflow, settleToken: _settle.Token)
+                : await runner.RunAsync(workflow, _reuse.Checked, _closeOthers.Checked, _minimize.Checked, _settings.KeepOpenApps,
                     settleToken: _settle.Token);
             _settled = settled;
             if (total > 0)
@@ -735,6 +816,20 @@ internal sealed class MainForm : Form
     {
         if (Selected is not { } wf)
             return;
+
+        if (wf.IsDesktopFlow)
+        {
+            if (TargetDesktopDialog.Show(this, wf.Name, wf.TargetDesktop, Math.Max(1, _desktops.GetDesktopIds().Count)) is not { } target)
+                return;
+            wf.TargetDesktop = target;
+            foreach (var entry in wf.Windows)
+                entry.DesktopIndex = target - 1;
+            _workflows.ResetItem(_workflows.IndexOf(wf));
+            SaveAll();
+            ShowSelected();
+            Log($"\"{wf.Name}\" now opens its apps on desktop {target}.");
+            return;
+        }
 
         var desktopCount = Math.Max(_desktops.GetDesktopIds().Count,
             Math.Max(wf.DesktopCount, wf.Windows.Select(w => w.DesktopIndex + 1).DefaultIfEmpty(0).Max()));
@@ -956,19 +1051,21 @@ internal sealed class MainForm : Form
             minimizing ? "Close the apps a workflow doesn't use" : "Minimize the apps a workflow doesn't use instead of closing them",
             GetModeHotkey()?.ToString() ?? "", ToggleMinimizeMode));
         items.Add(new QuickSwitcher.Item("Capture new workflow", "Save the apps that are open now as a workflow", "",
-            () => { ShowFromTray(); _ = CaptureFromSwitcherAsync(); }));
+            () => { ShowFromTray(); _ = CaptureFromSwitcherAsync(() => CaptureAsync(replace: null)); }));
+        items.Add(new QuickSwitcher.Item("New desktop flow", "Open one or two apps on a desktop of their own", "",
+            () => { ShowFromTray(); _ = CaptureFromSwitcherAsync(() => CaptureDesktopFlowAsync(replace: null)); }));
         items.Add(new QuickSwitcher.Item("Open FastFlow", "Show the manager window", "", ShowFromTray));
 
         QuickSwitcher.Toggle(items);
     }
 
-    private async Task CaptureFromSwitcherAsync()
+    private async Task CaptureFromSwitcherAsync(Func<Task> capture)
     {
         if (_running)
             return;
         try
         {
-            await CaptureAsync(replace: null);
+            await capture();
         }
         catch (Exception ex)
         {

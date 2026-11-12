@@ -11,7 +11,22 @@ internal sealed class WorkflowCapturer
 
     public WorkflowCapturer(VirtualDesktopService desktops) => _desktops = desktops;
 
-    public Workflow Capture(string name)
+    /// <summary>
+    /// A desktop flow: just the windows in <paramref name="handles"/>, all set to open on
+    /// <paramref name="targetDesktop"/> (1-based).
+    /// </summary>
+    public Workflow CaptureDesktopFlow(string name, IReadOnlyCollection<IntPtr> handles, int targetDesktop)
+    {
+        var workflow = Capture(name, handles);
+        workflow.Kind = WorkflowKind.Desktop;
+        workflow.TargetDesktop = Math.Max(1, targetDesktop);
+        foreach (var entry in workflow.Windows)
+            entry.DesktopIndex = workflow.TargetDesktop - 1;
+        return workflow;
+    }
+
+    /// <param name="only">Capture just these windows instead of every open one.</param>
+    public Workflow Capture(string name, IReadOnlyCollection<IntPtr>? only = null)
     {
         var desktopIds = _desktops.GetDesktopIds();
         var workflow = new Workflow
@@ -27,6 +42,8 @@ internal sealed class WorkflowCapturer
         // EnumWindows returns windows top-most first. Reverse so that launching in list order
         // leaves the originally top-most window on top again.
         var windows = WindowEnumerator.GetAppWindows();
+        if (only != null)
+            windows = windows.Where(w => only.Contains(w.Handle)).ToList();
         windows.Reverse();
 
         foreach (var window in windows)
