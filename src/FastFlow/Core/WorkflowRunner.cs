@@ -266,13 +266,21 @@ internal sealed class WorkflowRunner
             foreach (var w in related)
                 FileLog.Debug($"    candidate matches={Matches(entry, w)} exe=\"{w.ExecutablePath}\" aumid=\"{w.AppUserModelId}\" {Describe(w.Handle)}");
         }
+        // Folders open in each Explorer window, all tabs: a folder window is only used when it shows the entry's folder.
+        var explorerTabs = entries.Any(e => e.WindowClass == "CabinetWClass")
+            ? ExplorerFolders.GetOpenTabs()
+            : new Dictionary<IntPtr, List<string>>();
+        foreach (var (folderWindow, tabs) in explorerTabs)
+            FileLog.Debug($"Explorer window {folderWindow:X} tabs: {string.Join(" | ", tabs)}");
+
         var claimed = new HashSet<IntPtr>();
         var reused = new Dictionary<WindowEntry, IntPtr>();
         foreach (var entry in entries)
         {
-            // The window this flow used last time, wherever it is now.
+            // The window this flow used last time, wherever it is now (if it still shows the same folder).
             if (memory.Find(workflow, entry) is { } hwnd && !claimed.Contains(hwnd)
-                && open.TryGetValue(hwnd, out var window) && Matches(entry, window))
+                && open.TryGetValue(hwnd, out var window) && Matches(entry, window)
+                && (entry.WindowClass != "CabinetWClass" || ShowsFolder(entry, window, explorerTabs)))
             {
                 claimed.Add(hwnd);
                 reused[entry] = hwnd;
@@ -287,7 +295,7 @@ internal sealed class WorkflowRunner
             : new Dictionary<IntPtr, List<HostedScript>>();
         foreach (var entry in entries.Where(e => !reused.ContainsKey(e)).OrderBy(e => e.TerminalScripts.Count == 0))
         {
-            if (FindWindowForFlow(entry, openWindows, claimed, hostedScripts, target) is { } hwnd)
+            if (FindWindowForFlow(entry, openWindows, claimed, hostedScripts, explorerTabs, target) is { } hwnd)
             {
                 claimed.Add(hwnd);
                 reused[entry] = hwnd;
@@ -351,18 +359,21 @@ internal sealed class WorkflowRunner
         if (switched && placed.Count > 0)
             _desktops.SwitchToDesktop(index);
 
-        // Stack the windows as recorded, all above whatever else is on the desktop, with the first one in front.
+        // Lift every window of the flow above whatever else is on the desktop (e.g. a maximized browser), whether
+        // or not it was minimized, stacked as recorded with the first one in front and focused.
         for (var i = placed.Count - 1; i >= 0; i--)
-        {
-            SetWindowPos(placed[i].Handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-        }
+            BringToFront(placed[i].Handle);
         if (placed.Count > 0)
         {
             var foreground = SetForegroundWindow(placed[0].Handle);
             FileLog.Debug($"SetForegroundWindow({placed[0].Handle:X}) = {foreground}");
         }
         foreach (var (entry, handle) in placed)
-            FileLog.Debug($"After run {entry.ProcessName}: {Describe(handle)}");
+        {
+            var top = TopWindowAtCenter(handle);
+            FileLog.Debug($"After run {entry.ProcessName}: {Describe(handle)}  on top at its centre: "
+                          + (top == handle ? "itself" : Describe(top)));
+        }
         FileLog.Debug($"Foreground now: {Describe(GetForegroundWindow())}");
 
         _log(missing.Count == 0
@@ -416,7 +427,7 @@ internal sealed class WorkflowRunner
     /// and a folder window is only used when it shows the same folder.
     /// </summary>
     private IntPtr? FindWindowForFlow(WindowEntry entry, List<WindowInfo> openWindows, HashSet<IntPtr> claimed,
-        Dictionary<IntPtr, List<HostedScript>> hostedScripts, Guid? target)
+        Dictionary<IntPtr, List<HostedScript>> hostedScripts, Dictionary<IntPtr, List<string>> explorerTabs, Guid? target)
     {
         if (entry.Tabs.Count > 0)
             return null;
@@ -424,7 +435,7 @@ internal sealed class WorkflowRunner
         var candidates = openWindows
             .Where(w => !claimed.Contains(w.Handle) && IsWindow(w.Handle) && Matches(entry, w)
                         && RunsSameScripts(entry, w, hostedScripts))
-            .Where(w => entry.WindowClass != "CabinetWClass" || w.Title == entry.Title)
+            .Where(w => entry.WindowClass != "CabinetWClass" || ShowsFolder(entry, w, explorerTabs))
             .ToList();
         if (candidates.Count == 0)
             return null;
@@ -462,6 +473,40 @@ internal sealed class WorkflowRunner
         {
             // another workflow took over these windows
         }
+    }
+
+    /// <summary>
+    /// Whether an Explorer window has the entry's folder open in any of its tabs (the title only names the selected
+    /// tab). Entries without a folder fall back to the title.
+    /// </summary>
+    private static bool ShowsFolder(WindowEntry entry, WindowInfo window, Dictionary<IntPtr, List<string>> explorerTabs)
+    {
+        var folder = ExplorerFolders.FolderOf(entry.Arguments);
+        if (folder.Length == 0 || !explorerTabs.TryGetValue(window.Handle, out var tabs))
+            return window.Title == entry.Title;
+        return tabs.Any(t => string.Equals(ExplorerFolders.Normalize(t), folder, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Puts a window above every other (non-topmost) window without activating it. A plain HWND_TOP is ignored for
+    /// another app's window while a third app is in front – which left a restored window behind a maximized one –
+    /// but making it topmost and then not topmost again always lifts it.
+    /// </summary>
+    private static void BringToFront(IntPtr hwnd)
+    {
+        const uint flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
+        SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+    }
+
+    /// <summary>The top-level window at the middle of <paramref name="hwnd"/>, i.e. whether something covers it.</summary>
+    private static IntPtr TopWindowAtCenter(IntPtr hwnd)
+    {
+        if (!GetWindowRect(hwnd, out var rect))
+            return IntPtr.Zero;
+        var center = new POINT { X = (rect.Left + rect.Right) / 2, Y = (rect.Top + rect.Bottom) / 2 };
+        var at = WindowFromPoint(center);
+        return at == IntPtr.Zero ? IntPtr.Zero : GetAncestor(at, GA_ROOT);
     }
 
     /// <summary>One line describing a window's state, for the log file.</summary>
